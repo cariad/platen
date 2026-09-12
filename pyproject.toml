@@ -1,0 +1,68 @@
+[build-system]
+build-backend = "hatchling.build"
+requires = [
+  "hatchling",
+]
+
+[dependency-groups]
+dev = [
+  "pyright>=1.1.414",
+  "pytest>=9.1.1",
+  "pytest-cov>=7.1.0",
+  "ruff>=0.16.7",
+  "rumdl>=0.2.73",
+]
+
+[project]
+authors = [
+  { name = "Cariad Eccleston", email = "cariad@cariad.earth" },
+]
+description = "Press structured data into documents"
+license = "MIT"
+name = "platen"
+readme = "README.md"
+requires-python = ">=3.11"
+version = "0.1.0"
+
+[project.scripts]
+platen = "platen:main"
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = true
+
+[tool.coverage.run]
+branch = true
+source = [
+  "platen",
+]
+
+[tool.pyright]
+include = [
+  "src",
+  "tests",
+]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+
+[tool.pytest.ini_options]
+addopts = "--cov"
+testpaths = [
+  "tests",
+]
+
+[tool.ruff.lint]
+select = [
+  "ANN", # Require all type annotations
+  "B",   # flake8-bugbear
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "I",   # isort
+  "RUF", # ruff's own rules
+  "SIM", # flake8-simplify
+  "UP",  # pyupgrade
+]
+
+[tool.uv]
+required-version = "~=0.12.10"
