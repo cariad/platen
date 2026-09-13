@@ -2,7 +2,9 @@
 
 In a printing press, the *platen* presses paper against inked type.
 
-**platen** presses structured data into documents.
+**Platen** presses structured data into documents.
+
+See the [Platen user guide](https://cariad.github.io/platen) for usage and examples.
 
 ## Development
 
