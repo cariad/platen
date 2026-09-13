@@ -17,15 +17,16 @@ dev = [
 authors = [
   { name = "Cariad Eccleston", email = "cariad@cariad.earth" },
 ]
+dependencies = [
+  "jinja2>=3.1.6",
+  "ruamel-yaml>=0.19.1",
+]
 description = "Press structured data into documents"
 license = "MIT"
 name = "platen"
 readme = "README.md"
 requires-python = ">=3.11"
 version = "0.1.0"
-
-[project.scripts]
-platen = "platen:main"
 
 [tool.coverage.report]
 fail_under = 100
@@ -48,21 +49,37 @@ typeCheckingMode = "strict"
 
 [tool.pytest.ini_options]
 addopts = "--cov"
+log_level = "DEBUG"
 testpaths = [
   "tests",
 ]
 
 [tool.ruff.lint]
+extend-ignore = [
+  "D100", # Docstrings in public modules
+  "D104", # Docstrings in public packages
+  "D107", # Docstrings on __init__ functions
+  "D212", # Summary on the first line (we use D213 instead)
+]
+extend-select = [
+  "D213", # Summary on the second line
+]
 select = [
   "ANN", # Require all type annotations
   "B",   # flake8-bugbear
+  "D",   # pydocstyle
   "E",   # pycodestyle errors
   "F",   # pyflakes
+  "G",   # flake8-logging-format
   "I",   # isort
+  "LOG", # flake8-logging
   "RUF", # ruff's own rules
   "SIM", # flake8-simplify
   "UP",  # pyupgrade
 ]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.uv]
 required-version = "~=0.12.10"
