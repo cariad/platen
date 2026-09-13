@@ -48,6 +48,8 @@ class Platen:
             autoescape=select_autoescape(),
             keep_trailing_newline=True,
             loader=FileSystemLoader(self._templates_dir),
+            lstrip_blocks=True,
+            trim_blocks=True,
             undefined=StrictUndefined,
         )
 

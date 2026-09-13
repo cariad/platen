@@ -11,6 +11,10 @@ dev = [
   "pytest-cov>=7.1.0",
   "ruff>=0.16.7",
   "rumdl>=0.2.73",
+  { include-group = "docs" },
+]
+docs = [
+  "zensical>=0.0.61",
 ]
 
 [project]
@@ -80,6 +84,17 @@ select = [
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.rumdl]
+disable = [
+  "MD013", # Maximum line length
+]
+exclude = [
+  "examples/*/templates",
+]
+
+[tool.rumdl.per-file-flavor]
+"docs/**/*.md" = "mkdocs"
 
 [tool.uv]
 required-version = "~=0.12.10"

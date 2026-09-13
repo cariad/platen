@@ -1,0 +1,42 @@
+[project]
+copyright = "&copy; 2026 Cariad Eccleston"
+nav = [
+  { "Get started" = "index.md" },
+]
+repo_name = "cariad/platen"
+repo_url = "https://github.com/cariad/platen"
+site_author = "Cariad Eccleston"
+site_description = "Press structured data into documents."
+site_name = "Platen documentation"
+site_url = "https://cariad.github.io/platen/"
+strict = true
+
+[project.theme]
+features = [
+  "content.code.copy", # Copy button in code blocks
+  "content.tabs.link", # Content tabs that share a label switch together
+]
+
+[project.theme.icon]
+logo = "lucide/stamp"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/cariad/"
+name = "Cariad Eccleston on GitHub"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/linkedin"
+link = "https://www.linkedin.com/in/cariad/"
+name = "Cariad Eccleston on LinkedIn"

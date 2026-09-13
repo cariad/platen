@@ -1,0 +1,11 @@
+groups:
+  - name: Home
+    tasks:
+      - Make the tea
+      - Wash the dog
+      - Read a book
+
+  - name: Work
+    tasks:
+      - Fix the login form
+      - Deploy to production

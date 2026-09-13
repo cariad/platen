@@ -1,0 +1,44 @@
+name: Publish Documentation
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  # actions/deploy-pages proves to GitHub Pages that the deployment
+  # originated from this workflow.
+  id-token: write
+  pages: write
+
+concurrency:
+  cancel-in-progress: false
+  group: pages
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+
+      # `uv run --locked` syncs, so `uv sync` isn't needed.
+      #
+      # `--only-group docs` install only the `docs` dependency group,
+      # because that's all we need to build and deploy the site.
+      #
+      # `zensical build` builds the site to the `site` directory.
+      - run: uv run --locked --only-group docs zensical build
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+      - uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        id: deployment

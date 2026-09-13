@@ -1,0 +1,13 @@
+<html>
+<body>
+  <h1>My task list</h1>
+  {% for group in groups %}
+  <h2>{{ group.name }}</h2>
+  <ul>
+    {% for task in group.tasks %}
+    <li>{{ task }}</li>
+    {% endfor %}
+  </ul>
+  {% endfor %}
+</body>
+</html>
