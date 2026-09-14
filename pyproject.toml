@@ -63,6 +63,7 @@ extend-ignore = [
   "D100", # Docstrings in public modules
   "D104", # Docstrings in public packages
   "D107", # Docstrings on __init__ functions
+  "D205", # One-line docstring summary followed by detail
   "D212", # Summary on the first line (we use D213 instead)
 ]
 extend-select = [
