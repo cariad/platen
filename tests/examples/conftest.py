@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from pathlib import Path
+from stat import S_IMODE
 from typing import Any, cast
 
 from pytest import FixtureRequest, fixture
@@ -21,12 +22,22 @@ def assert_file_was_pressed(
     def _assert(actual: Path) -> None:
         assert actual.exists(), f"Nothing pressed at '{actual}'"
 
-        expect = expect_dir / actual.relative_to(platen.output_dir)
+        rel_path = actual.relative_to(platen.output_dir)
+        expect = expect_dir / rel_path
         assert expect.exists(), f"No expectation at '{expect}'"
 
         actual_body = actual.read_text(encoding="utf-8")
         expect_body = expect.read_text(encoding="utf-8")
         assert actual_body == expect_body
+
+        template = platen.templates_dir / rel_path
+        actual_mode = S_IMODE(actual.stat().st_mode)
+        expect_mode = S_IMODE(template.stat().st_mode)
+
+        assert actual_mode == expect_mode, (
+            f"'{actual}' has mode {actual_mode:o} but its template "
+            f"'{template}' has mode {expect_mode:o}"
+        )
 
     return _assert
 
