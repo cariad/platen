@@ -14,7 +14,7 @@ class NestedDirectoriesError(PlatenError, ValueError):
         templates_dir: Path,
         output_dir: Path,
     ) -> None:
-        super().__init__(output_dir, templates_dir)
+        super().__init__(templates_dir, output_dir)
         self.output_dir = output_dir
         self.templates_dir = templates_dir
 
