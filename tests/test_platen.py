@@ -1,5 +1,6 @@
 from pathlib import Path
 from re import escape
+from stat import S_IMODE
 
 from pytest import raises
 
@@ -23,6 +24,38 @@ def test_output_dir_is_path(
     )
 
     assert platen.output_dir == output_dir
+
+
+def test_press_updates_permissions(
+    output_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """
+    `press` must update the pressed file's permissions.
+
+    Pressed files must have exactly the same permissions as their
+    templates. Overwriting an existing file doesn't change its
+    permissions, so this test specifically tests that re-pressing a
+    template after its permissions changed updates the pressed file.
+    """
+    templates_dir = tmp_path / "source"
+    templates_dir.mkdir()
+
+    template = templates_dir / "script.sh"
+    template.write_text("echo hello\n", encoding="utf-8")
+
+    platen = Platen(
+        templates_dir,
+        output_dir,
+        {},
+    )
+
+    pressed = platen.output_dir / "script.sh"
+
+    for mode in (0o755, 0o644, 0o700):
+        template.chmod(mode)
+        platen.press("script.sh")
+        assert S_IMODE(pressed.stat().st_mode) == mode
 
 
 def test_template_is_within_templates_dir(

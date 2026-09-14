@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from logging import getLogger
 from os import PathLike
 from pathlib import Path
+from shutil import copymode
 from typing import Any
 
 from jinja2 import (
@@ -108,6 +109,9 @@ class Platen:
             encoding="utf-8",
             newline="\n",
         )
+
+        # Replicate the original file permissions:
+        copymode(template, build_path)
 
         log.info("Pressed %s to %s", rel_path, build_path)
 
