@@ -2,9 +2,53 @@ from pathlib import Path
 from re import escape
 from stat import S_IMODE
 
-from pytest import raises
+from pytest import mark, raises
 
-from platen import Platen, TemplateNotInDirectoryError
+from platen import NestedDirectoriesError, Platen, TemplateNotInDirectoryError
+
+
+@mark.parametrize(
+    ("templates_subdir", "output_subdir"),
+    [
+        ("dir", "dir"),
+        ("dir/templates", "dir"),
+        ("dir", "dir/build"),
+    ],
+    ids=[
+        "same directory",
+        "templates within output",
+        "output within templates",
+    ],
+)
+def test_directories_are_not_nested(
+    templates_subdir: str,
+    output_subdir: str,
+    tmp_path: Path,
+) -> None:
+    """
+    Platen must not allow the templates and output directories to be the
+    same, or for either to be nested within the other.
+    """
+    output_dir = tmp_path / output_subdir
+    templates_dir = tmp_path / templates_subdir
+
+    expect = (
+        f"Templates directory '{templates_dir}' and output directory "
+        f"'{output_dir}' cannot be the same or nested within each other"
+    )
+
+    with raises(
+        NestedDirectoriesError,
+        match=escape(expect),
+    ) as ex:
+        Platen(
+            templates_dir,
+            output_dir,
+            {},
+        )
+
+    assert ex.value.output_dir == output_dir
+    assert ex.value.templates_dir == templates_dir
 
 
 def test_output_dir_is_path(

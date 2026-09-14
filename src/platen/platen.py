@@ -12,7 +12,7 @@ from jinja2 import (
     select_autoescape,
 )
 
-from .exceptions import TemplateNotInDirectoryError
+from .exceptions import NestedDirectoriesError, TemplateNotInDirectoryError
 
 log = getLogger(__name__)
 
@@ -33,6 +33,10 @@ class Platen:
         templates_dir: Path to the source templates directory.
         output_dir: Path to the build output directory.
         values: Values to press into the templates.
+
+    Raises:
+        NestedDirectoriesError: When `templates_dir` and `output_dir`
+            are the same directory or nested within each other.
     """
 
     def __init__(
@@ -45,6 +49,8 @@ class Platen:
         self._output_dir = Path(output_dir).resolve()
         self._values = values
 
+        self._assert_directories_not_nested()
+
         self._env = Environment(
             autoescape=select_autoescape(),
             keep_trailing_newline=True,
@@ -53,6 +59,28 @@ class Platen:
             trim_blocks=True,
             undefined=StrictUndefined,
         )
+
+    def _assert_directories_not_nested(self) -> None:
+        """
+        Asserts that the templates and output directories are not the
+        same, and that neither is nested within the other.
+
+        Raises:
+            NestedDirectoriesError: When the templates and output
+                directories are the same or one is nested within the
+                other.
+        """
+        is_nested = self._templates_dir.is_relative_to(
+            self._output_dir,
+        ) or self._output_dir.is_relative_to(
+            self._templates_dir,
+        )
+
+        if is_nested:
+            raise NestedDirectoriesError(
+                self._templates_dir,
+                self._output_dir,
+            )
 
     @property
     def output_dir(self) -> Path:
