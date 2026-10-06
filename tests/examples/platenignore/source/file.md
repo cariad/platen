@@ -1,0 +1,3 @@
+# examples/platenignore
+
+{{ greeting }}, world!

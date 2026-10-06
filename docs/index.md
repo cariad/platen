@@ -111,7 +111,7 @@ Create a template for each document using [Jinja](https://jinja.palletsprojects.
     </html>
     ```
 
-To build the Markdown and HTML documents, instantiate the `Platen` class with the source and build directories, and values to press, then call `.press()` for each template:
+To build the Markdown and HTML documents, instantiate the `Platen` class with the source and build directories, and values to press, then call `.press()`:
 
 ```python
 from platen import Platen
@@ -122,11 +122,10 @@ platen = Platen(
     values,  # Loaded from your preferred data format
 )
 
-platen.press("tasks.md")
-platen.press("tasks.html")
+platen.press()
 ```
 
-This will press these documents into your build output directory:
+This will press every template into the build directory:
 
 === "tasks.md"
 
@@ -165,3 +164,28 @@ This will press these documents into your build output directory:
     </body>
     </html>
     ```
+
+To press a single template or a subdirectory of templates, pass its path relative to the templates directory:
+
+```python
+platen.press("tasks.md")
+platen.press("posts")
+```
+
+## Binary files
+
+Text files are pressed as templates. Binary files, like images, can't be templates, so they're copied to the build output directory as-is.
+
+## Ignoring files
+
+To keep files out of your build output directory, list them in a `.platenignore` file in your templates directory. These files use `.gitignore`-style patterns, and can be nested in subdirectories:
+
+```gitignore
+# Partials are only ever included by other templates.
+_partials/
+
+# Drafts aren't ready to publish.
+*.draft.md
+```
+
+Platen reads `.platenignore` files with [Mosey](https://cariad.github.io/mosey/), so see Mosey's [ignore-files guide](https://cariad.github.io/mosey/ignore-files/) for the exact rules.

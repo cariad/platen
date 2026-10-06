@@ -1,0 +1,3 @@
+# examples/subdirectory
+
+{{ greeting }}, world!

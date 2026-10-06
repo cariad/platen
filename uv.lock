@@ -257,6 +257,15 @@ wheels = [
 ]
 
 [[package]]
+name = "mosey"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/dd/15/64d1f47b9f2d3cd534543b290dd0bf41f0dff1e0d0a7976210067db31829/mosey-0.2.0.tar.gz", hash = "sha256:24f7b487d6235fcae485a963c1124f8f6f89d37e994ff9f70ebed60b7a5c4773", size = 120796, upload-time = "2026-10-05T11:50:46.04Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/3b/6ff975f31e7d05a15bb5279a2111832cacae4258ee41062a507c4cf011c9/mosey-0.2.0-py3-none-any.whl", hash = "sha256:760c6d62affdd9156f463988a21c78d4b68635c724e1c66ff2f43f5074249a81", size = 23895, upload-time = "2026-10-05T11:50:44.892Z" },
+]
+
+[[package]]
 name = "nodeenv"
 version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
@@ -280,6 +289,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "jinja2" },
+    { name = "mosey" },
     { name = "ruamel-yaml" },
 ]
 
@@ -299,6 +309,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "jinja2", specifier = ">=3.1.6" },
+    { name = "mosey", specifier = ">=0.2.0" },
     { name = "ruamel-yaml", specifier = ">=0.19.1" },
 ]
 
