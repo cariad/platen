@@ -1,6 +1,7 @@
 from collections.abc import Mapping
+from errno import EISDIR
 from logging import getLogger
-from os import PathLike
+from os import PathLike, strerror
 from pathlib import Path
 from shutil import copyfile, copymode
 from typing import Any
@@ -124,8 +125,13 @@ class Platen:
         A template that's named explicitly is always pressed, because `.platenignore`
         files never apply to explicitly named templates.
 
+        Symlinks within the templates directory are pressed like files. They're never
+        walked into, and a symlink to a directory can't be pressed.
+
         Results are written to the same relative path in the build output directory as
-        the template is in the source templates directory.
+        the template is in the source templates directory. A template that's named
+        through symlinks, or that is itself a symlink, is written to the path that *it*
+        is named by, not its target.
 
         For example, if the source templates directory is `./templates`
         and the build output directory is `./build` then:
@@ -143,34 +149,38 @@ class Platen:
             Defaults to the entire source templates directory.
 
         Raises:
-            IsADirectoryError: When a directory being pressed holds a symlink to a
-                directory. When pressing a directory, symlinks are pressed like files,
-                and are never followed into directories.
-            TemplateNotInDirectoryError: When `template` is not a path
-                within the source templates directory.
+            IsADirectoryError: When `template` names a symlink to a directory, a
+                directory within one, or a directory that holds one that `.platenignore`
+                files don't ignore.
+
+                Symlinks within the templates directory are pressed like files, and are
+                never walked into.
+
+            TemplateNotInDirectoryError: When `template` is not a path within the source
+                templates directory, or a symlink leads it outside.
 
                 Templates must exist within the source templates
                 directory so that referenced templates (`extends`,
                 `include`, `import`, etc) can be resolved relative to
                 that directory.
         """
-        path = (
-            self._templates_dir
-            if template is None
-            else (self._templates_dir / template).resolve()
-        )
+        path = self._templates_dir if template is None else self._named_path(template)
 
-        if not path.is_relative_to(self._templates_dir):
-            raise TemplateNotInDirectoryError(
-                path,
-                self._templates_dir,
-            )
-
-        rel_path = path.relative_to(self._templates_dir).as_posix()
+        rel = path.relative_to(self._templates_dir)
+        rel_path = rel.as_posix()
 
         if not path.is_dir():
             self._press_file(rel_path)
             return
+
+        # Symlinks are pressed like files and never walked into, so neither a symlink to
+        # a directory nor a directory within one can be pressed. Raise the same error
+        # that a walk raises when it meets the outermost symlink.
+        for named in (*reversed(rel.parents[:-1]), rel):
+            within = self._templates_dir / named
+
+            if within.is_symlink():
+                raise IsADirectoryError(EISDIR, strerror(EISDIR), str(within))
 
         # Mosey never reads ignore-files above the directory it walks, so walk the whole
         # templates directory and keep only the files within the requested directory.
@@ -191,6 +201,60 @@ class Platen:
                 "Nothing to press in %s: it's empty, or everything in it is ignored",
                 path,
             )
+
+    def _named_path(self, template: PathLike[str] | str) -> Path:
+        """
+        Get the path to a named template, or directory of templates, within the source
+        templates directory.
+
+        Symlinks within the templates directory keep their names, so that a template is
+        pressed to the path it's named by, and the path's final symlink is never
+        followed. Symlinks outside the templates directory that lead into it are
+        followed.
+
+        Args:
+            template: Path to the template or directory, either relative to the source
+                templates directory or absolute.
+
+        Returns:
+            Path to the template or directory within the source templates directory.
+
+        Raises:
+            TemplateNotInDirectoryError: When `template` is not a path within the source
+                templates directory, or a symlink leads it outside.
+        """
+        path = self._templates_dir
+
+        # Step up with ".." the same way the operating system does: from a symlink's
+        # target, rather than from the directory that holds the symlink.
+        for part in Path(template).parts:
+            if part == "..":
+                path = (path.resolve() if path.is_symlink() else path).parent
+            else:
+                path /= part
+
+        # An absolute path might reach the templates directory through a symlink (like
+        # "/var" to "/private/var" on macOS), so find where it first leads into the
+        # templates directory, and keep the rest as it's named.
+        if not path.is_relative_to(self._templates_dir):
+            for entry in (*reversed(path.parents), path):
+                resolved = entry.resolve()
+
+                if resolved.is_relative_to(self._templates_dir):
+                    path = resolved / path.relative_to(entry)
+                    break
+
+        # Check where the path really leads, so that it can't be outside the templates
+        # directory, even through a symlink.
+        resolved = path.resolve()
+
+        if not resolved.is_relative_to(self._templates_dir):
+            raise TemplateNotInDirectoryError(
+                resolved,
+                self._templates_dir,
+            )
+
+        return path
 
     def _press_file(self, rel_path: str) -> None:
         """
