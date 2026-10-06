@@ -1,0 +1,3 @@
+# examples/platenignore/drafts
+
+{{ undefined }}

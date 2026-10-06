@@ -23,6 +23,7 @@ authors = [
 ]
 dependencies = [
   "jinja2>=3.1.6",
+  "mosey>=0.2.0",
   "ruamel-yaml>=0.19.1",
 ]
 description = "Press structured data into documents"

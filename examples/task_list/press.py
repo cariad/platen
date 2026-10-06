@@ -13,5 +13,4 @@ platen = Platen(
     values,
 )
 
-platen.press("tasks.html")
-platen.press("tasks.md")
+platen.press()

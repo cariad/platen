@@ -1,0 +1,6 @@
+# Drafts and logs are never pressed.
+*.draft.md
+*.log
+
+# Nor is anything in the drafts directory.
+drafts/

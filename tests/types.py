@@ -3,3 +3,6 @@ from pathlib import Path
 
 AssertFileWasPressed = Callable[[Path], None]
 """Callback to assert that a file was pressed."""
+
+AssertOutputMatchesExpect = Callable[[], None]
+"""Callback to assert that the output directory matches expectations."""

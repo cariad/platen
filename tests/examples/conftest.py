@@ -7,7 +7,7 @@ from pytest import FixtureRequest, fixture
 from ruamel.yaml import YAML
 
 from platen.platen import Platen
-from tests.types import AssertFileWasPressed
+from tests.types import AssertFileWasPressed, AssertOutputMatchesExpect
 
 _yaml = YAML(typ="safe")
 
@@ -26,8 +26,8 @@ def assert_file_was_pressed(
         expect = expect_dir / rel_path
         assert expect.exists(), f"No expectation at '{expect}'"
 
-        actual_body = actual.read_text(encoding="utf-8")
-        expect_body = expect.read_text(encoding="utf-8")
+        actual_body = actual.read_bytes()
+        expect_body = expect.read_bytes()
         assert actual_body == expect_body
 
         template = platen.templates_dir / rel_path
@@ -38,6 +38,28 @@ def assert_file_was_pressed(
             f"'{actual}' has mode {actual_mode:o} but its template "
             f"'{template}' has mode {expect_mode:o}"
         )
+
+    return _assert
+
+
+@fixture
+def assert_output_matches_expect(
+    assert_file_was_pressed: AssertFileWasPressed,
+    expect_dir: Path,
+    platen: Platen,
+) -> AssertOutputMatchesExpect:
+    """
+    A callback that asserts that the output directory contains exactly
+    the expected files, and that each of them was pressed.
+    """
+
+    def _assert() -> None:
+        expect = _relative_files(expect_dir)
+        actual = _relative_files(platen.output_dir)
+        assert actual == expect
+
+        for rel_path in actual:
+            assert_file_was_pressed(platen.output_dir / rel_path)
 
     return _assert
 
@@ -60,6 +82,13 @@ def platen(
         output_dir,
         values,
     )
+
+
+def _relative_files(directory: Path) -> set[Path]:
+    """Relative paths of every file within a directory."""
+    return {
+        path.relative_to(directory) for path in directory.rglob("*") if path.is_file()
+    }
 
 
 @fixture
