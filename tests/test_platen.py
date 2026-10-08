@@ -197,6 +197,11 @@ def test_press_directory_raises_for_symlink_to_directory(
             NotADirectoryError,
             "missing/../file_in_way/sub/b.md",
         ),
+        (
+            "file_in_way/sub/../out",
+            NotADirectoryError,
+            "file_in_way/sub/../out",
+        ),
         ("dangling", FileNotFoundError, "dangling/z.md"),
         ("beneath_file", NotADirectoryError, "beneath_file/z.md"),
         ("into_result", NotADirectoryError, "into_result/sub/b.md"),
@@ -207,6 +212,7 @@ def test_press_directory_raises_for_symlink_to_directory(
         "directory in the way of a file, via parent of missing directory",
         "file in the way of a directory",
         "file in the way of a directory, via parent of missing directory",
+        "via parent of file",
         "symlink into missing directory",
         "symlink beneath file",
         "symlink into another result",
@@ -836,10 +842,12 @@ def test_press_file_raises_when_destination_is_directory(
     [
         "doc.md",
         "new/doc.md",
+        "../doc.md",
     ],
     ids=[
         "within file",
         "within missing directory within file",
+        "via parent of file",
     ],
 )
 def test_press_file_raises_when_destination_is_within_file(
@@ -848,7 +856,8 @@ def test_press_file_raises_when_destination_is_within_file(
 ) -> None:
     """
     `press_file` must raise `NotADirectoryError` before rendering when its destination
-    is within a file, however deeply.
+    is within a file, however deeply, or steps up out of one with "..", like the
+    operating system does.
     """
     templates_dir = tmp_path / "source"
     templates_dir.mkdir()
@@ -871,6 +880,7 @@ def test_press_file_raises_when_destination_is_within_file(
     assert ex.value.errno == ENOTDIR
     assert ex.value.filename == str(destination)
     assert in_the_way.read_text(encoding="utf-8") == "In the way\n"
+    assert not (tmp_path / "doc.md").exists()
 
 
 @mark.parametrize(

@@ -67,6 +67,39 @@ class _Arguments(NamedTuple):
     """`path`, relative to the source templates directory."""
 
 
+def _assert_traversable(path: Path) -> None:
+    """
+    Assert that a path never steps through a file as if it were a directory.
+
+    Destinations are resolved with `realpath`, which steps up with ".." from anything,
+    but the operating system refuses to step through a file: "blocker/../result.md" is
+    refused when `blocker` is a file. A ".." that steps up out of a directory that
+    doesn't exist yet is still allowed, as it would be once the directory existed.
+
+    Args:
+        path: Absolute path to check.
+
+    Raises:
+        NotADirectoryError: When a part of `path` that's followed by another part is a
+            file rather than a directory.
+        OSError: When a part of `path` can't be checked, like when permissions deny it
+            or symlinks loop.
+    """
+    current = Path(path.anchor)
+
+    for part in path.parts[1:]:
+        try:
+            is_dir = S_ISDIR(stat(current).st_mode)
+        except FileNotFoundError:
+            # A directory that doesn't exist yet can be stepped into, and up out of.
+            is_dir = True
+
+        if not is_dir:
+            raise _os_error(NotADirectoryError, path)
+
+        current = Path(realpath(current / part))
+
+
 def _job(destination: Path, name: str) -> Job:
     """
     Make a job, resolving where its result will be written.
@@ -633,7 +666,8 @@ class Platen:
 
             NotADirectoryError: When `directory` isn't a directory, is a symlink, or is
                 within a symlink to a directory. Also when `destination` isn't a
-                directory, or a file is where a directory must be.
+                directory or steps through a file, like "blocker/../build", or a file is
+                where a directory must be.
 
             OSError: When a template can't be read or a result can't be written, like
                 when permissions deny it or symlinks loop.
@@ -649,11 +683,10 @@ class Platen:
         if not arguments.is_dir:
             raise _os_error(NotADirectoryError, arguments.path)
 
-        jobs = self._plan_directory(
-            arguments.path,
-            arguments.rel,
-            Path(arguments.destination).absolute(),
-        )
+        destination_path = Path(arguments.destination).absolute()
+        _assert_traversable(destination_path)
+
+        jobs = self._plan_directory(arguments.path, arguments.rel, destination_path)
 
         if not jobs:
             log.warning(
@@ -718,7 +751,8 @@ class Platen:
                 `destination` is a directory or names one, like "build/", "build/." or
                 "build/x/..".
 
-            NotADirectoryError: When `template` is within a file, or `destination` is.
+            NotADirectoryError: When `template` is within a file, or `destination` is,
+                or `destination` steps through a file, like "blocker/../result.md".
 
             OSError: When the template can't be read or the result can't be written,
                 like when permissions deny it or symlinks loop.
@@ -748,7 +782,10 @@ class Platen:
                 join(getcwd(), arguments.destination),
             )
 
-        job = _job(Path(arguments.destination).absolute(), arguments.rel.as_posix())
+        destination_path = Path(arguments.destination).absolute()
+        _assert_traversable(destination_path)
+
+        job = _job(destination_path, arguments.rel.as_posix())
         self._press([job], None)
 
     @property
