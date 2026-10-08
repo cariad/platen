@@ -12,25 +12,30 @@ from tests.types import AssertFileWasPressed, AssertOutputMatchesExpect
 _yaml = YAML(typ="safe")
 
 
+def _relative_files(directory: Path) -> set[Path]:
+    """Relative paths of every file within a directory."""
+    return {
+        path.relative_to(directory) for path in directory.rglob("*") if path.is_file()
+    }
+
+
 @fixture
 def assert_file_was_pressed(
     expect_dir: Path,
-    platen: Platen,
+    output_dir: Path,
 ) -> AssertFileWasPressed:
-    """A callback that asserts that a file was pressed."""
+    """A callback that asserts that a template was pressed to a file."""
 
-    def _assert(actual: Path) -> None:
+    def _assert(template: Path, actual: Path) -> None:
         assert actual.exists(), f"Nothing pressed at '{actual}'"
 
-        rel_path = actual.relative_to(platen.output_dir)
-        expect = expect_dir / rel_path
+        expect = expect_dir / actual.relative_to(output_dir)
         assert expect.exists(), f"No expectation at '{expect}'"
 
         actual_body = actual.read_bytes()
         expect_body = expect.read_bytes()
         assert actual_body == expect_body
 
-        template = platen.templates_dir / rel_path
         actual_mode = S_IMODE(actual.stat().st_mode)
         expect_mode = S_IMODE(template.stat().st_mode)
 
@@ -46,20 +51,25 @@ def assert_file_was_pressed(
 def assert_output_matches_expect(
     assert_file_was_pressed: AssertFileWasPressed,
     expect_dir: Path,
-    platen: Platen,
+    output_dir: Path,
+    templates_dir: Path,
 ) -> AssertOutputMatchesExpect:
     """
     A callback that asserts that the output directory contains exactly
-    the expected files, and that each of them was pressed.
+    the expected files, and that each of them was pressed from the
+    template at the same relative path.
     """
 
     def _assert() -> None:
         expect = _relative_files(expect_dir)
-        actual = _relative_files(platen.output_dir)
+        actual = _relative_files(output_dir)
         assert actual == expect
 
         for rel_path in actual:
-            assert_file_was_pressed(platen.output_dir / rel_path)
+            assert_file_was_pressed(
+                templates_dir / rel_path,
+                output_dir / rel_path,
+            )
 
     return _assert
 
@@ -74,21 +84,12 @@ def expect_dir(request: FixtureRequest) -> Path:
 def platen(
     values: Mapping[str, Any],
     templates_dir: Path,
-    output_dir: Path,
 ) -> Platen:
-    """A `Platen` instance that outputs to a temporary directory."""
+    """A `Platen` instance that presses this test's templates and values."""
     return Platen(
         templates_dir,
-        output_dir,
         values,
     )
-
-
-def _relative_files(directory: Path) -> set[Path]:
-    """Relative paths of every file within a directory."""
-    return {
-        path.relative_to(directory) for path in directory.rglob("*") if path.is_file()
-    }
 
 
 @fixture
