@@ -170,6 +170,9 @@ class Platen:
         values: Values to press into the templates.
         protect: Paths to files that must never be pressed over, like the file that the
             values were read from.
+
+            Relative paths are relative to the working directory that Platen is
+            constructed in.
     """
 
     def __init__(
@@ -181,7 +184,10 @@ class Platen:
     ) -> None:
         self._templates_dir = Path(realpath(templates_dir))
         self._values = values
-        self._protect = tuple(protect)
+        # Anchor relative paths now, like the templates directory, so that changing the
+        # working directory before a press can't change which files are protected. They
+        # aren't resolved until each press, so that they're checked where they lead.
+        self._protect = tuple(Path(p).absolute() for p in protect)
 
         self._env = Environment(
             autoescape=select_autoescape(),
@@ -308,7 +314,7 @@ class Platen:
             if (found := identity(template)) is not None:
                 templates[found] = template
 
-        for path in map(Path, self._protect):
+        for path in self._protect:
             # Likewise, a protected file that doesn't exist can't be overwritten.
             if (found := identity(path)) is not None:
                 protected[found] = path

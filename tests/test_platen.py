@@ -1207,6 +1207,37 @@ def test_press_presses_through_symlink_to_templates_dir(
     assert pressed == expect
 
 
+def test_press_protects_relative_path_from_construction_working_directory(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    A relative protected path must stay relative to the working directory that Platen
+    was constructed in, even when the working directory changes before a press.
+    """
+    templates_dir = tmp_path / "templates"
+    templates_dir.mkdir()
+    (templates_dir / "doc.md").write_text("Hello, world!\n", encoding="utf-8")
+    values = tmp_path / "values.yaml"
+    values.write_text("greeting: Hello\n", encoding="utf-8")
+    (tmp_path / "build").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    platen = Platen(
+        templates_dir,
+        {},
+        protect=["values.yaml"],
+    )
+
+    monkeypatch.chdir(tmp_path / "build")
+
+    with raises(DestinationIsProtectedError) as ex:
+        platen.press_file("doc.md", values)
+
+    assert ex.value.protected_path == values
+    assert values.read_text(encoding="utf-8") == "greeting: Hello\n"
+
+
 @mark.parametrize(
     ("method", "template", "destination"),
     [

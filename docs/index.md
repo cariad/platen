@@ -260,7 +260,7 @@ Platen checks every press before it writes anything, and refuses one that would 
 
 - `press` and `press_directory` never press two templates to the same file, like through a symlink or hard link within the destination, so one result can't overwrite another. They raise `FileExistsError` instead.
 
-- It never presses to a destination that's the same file as one that you ask it to protect, by any name. Pass the paths to protect, like the file that your values were read from, as `Platen(templates_dir, values, protect=[values_path])`. It raises `DestinationIsProtectedError` instead.
+- It never presses to a destination that's the same file as one that you ask it to protect, by any name. Pass the paths to protect, like the file that your values were read from, as `Platen(templates_dir, values, protect=[values_path])`. Relative paths are relative to your working directory when you create the `Platen`. It raises `DestinationIsProtectedError` instead.
 
 `DestinationIsProtectedError`, `DestinationIsTemplateError` and `DestinationWithinDirectoryError` are subclasses of `PlatenError` and `ValueError`.
 
