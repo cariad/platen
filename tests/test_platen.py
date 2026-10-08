@@ -10,25 +10,14 @@ from jinja2 import UndefinedError
 from pytest import LogCaptureFixture, MonkeyPatch, mark, raises, skip
 
 from platen import (
+    DestinationIsProtectedError,
     DestinationIsTemplateError,
     DestinationWithinDirectoryError,
     Platen,
     TemplateNotInDirectoryError,
 )
 from platen.files import identity
-
-
-def _snapshot(directory: Path) -> dict[Path, tuple[bytes, int] | None]:
-    """
-    Snapshot everything within a directory, so that a test can assert that nothing
-    changed: every path, and the body and mode of every file.
-    """
-    return {
-        p.relative_to(directory): (
-            (p.read_bytes(), S_IMODE(p.stat().st_mode)) if p.is_file() else None
-        )
-        for p in directory.rglob("*")
-    }
+from tests.snapshots import snapshot
 
 
 def _symlinked_directories(tmp_path: Path) -> Path:
@@ -265,13 +254,13 @@ def test_press_directory_raises_when_destination_is_in_the_way(
         {"greeting": "Hello"},
     )
 
-    before = _snapshot(tmp_path)
+    before = snapshot(tmp_path)
 
     with raises(expect) as ex:
         platen.press_directory(".", tmp_path / destination)
 
     assert ex.value.filename == str(tmp_path / expect_destination)
-    assert _snapshot(tmp_path) == before
+    assert snapshot(tmp_path) == before
 
 
 def test_press_directory_raises_when_destination_is_template_via_missing_dir(
@@ -297,14 +286,14 @@ def test_press_directory_raises_when_destination_is_template_via_missing_dir(
         {"greeting": "Hello"},
     )
 
-    before = _snapshot(tmp_path)
+    before = snapshot(tmp_path)
 
     with raises(DestinationIsTemplateError) as ex:
         platen.press_directory("sub", destination)
 
     assert ex.value.destination_path == destination / "link"
     assert ex.value.template_path == platen.templates_dir / "sub" / "link"
-    assert _snapshot(tmp_path) == before
+    assert snapshot(tmp_path) == before
 
 
 @mark.parametrize(
@@ -349,7 +338,7 @@ def test_press_directory_raises_when_destinations_collide(
         {"greeting": "Hello"},
     )
 
-    before = _snapshot(tmp_path)
+    before = snapshot(tmp_path)
 
     with raises(FileExistsError) as ex:
         platen.press_directory(".", destination)
@@ -357,7 +346,7 @@ def test_press_directory_raises_when_destinations_collide(
     assert ex.value.errno == EEXIST
     assert ex.value.filename == str(destination / expect_destination)
     assert ex.value.filename2 == str(destination / expect_claimed)
-    assert _snapshot(tmp_path) == before
+    assert snapshot(tmp_path) == before
 
 
 @mark.parametrize(
@@ -827,14 +816,14 @@ def test_press_file_raises_when_destination_is_directory(
         {},
     )
 
-    before = _snapshot(tmp_path)
+    before = snapshot(tmp_path)
 
     with raises(IsADirectoryError) as ex:
         platen.press_file("file", spelling)
 
     assert ex.value.errno == EISDIR
     assert ex.value.filename == str(tmp_path / spelling)
-    assert _snapshot(tmp_path) == before
+    assert snapshot(tmp_path) == before
 
 
 @mark.parametrize(
@@ -1047,6 +1036,22 @@ def test_press_file_updates_permissions(
         assert S_IMODE(pressed.stat().st_mode) == mode
 
 
+def test_press_ignores_protected_file_that_does_not_exist(tmp_path: Path) -> None:
+    """A protected file that doesn't exist must not stop a press."""
+    templates_dir = tmp_path / "templates"
+    templates_dir.mkdir()
+    (templates_dir / "doc.md").write_text("Hello, world!\n", encoding="utf-8")
+
+    platen = Platen(
+        templates_dir,
+        {},
+        protect=[tmp_path / "missing.yaml"],
+    )
+
+    platen.press_file("doc.md", tmp_path / "doc.md")
+    assert (tmp_path / "doc.md").read_text(encoding="utf-8") == "Hello, world!\n"
+
+
 def test_press_presses_into_directory_that_contains_templates_dir(
     tmp_path: Path,
 ) -> None:
@@ -1247,7 +1252,7 @@ def test_press_raises_for_empty_path(
         {},
     )
 
-    before = _snapshot(tmp_path)
+    before = snapshot(tmp_path)
 
     with raises(FileNotFoundError) as ex:
         if method == "press":
@@ -1260,7 +1265,7 @@ def test_press_raises_for_empty_path(
     assert ex.value.errno == ENOENT
     assert ex.value.strerror == strerror(ENOENT)
     assert ex.value.filename == ""
-    assert _snapshot(tmp_path) == before
+    assert snapshot(tmp_path) == before
 
 
 @mark.parametrize(
@@ -1337,14 +1342,14 @@ def test_press_raises_for_symlink_loop_in_destination(
     )
 
     press = platen.press_file if method == "press_file" else platen.press_directory
-    before = _snapshot(tmp_path)
+    before = snapshot(tmp_path)
 
     with raises(OSError) as ex:
         press(template, tmp_path / destination)
 
     assert type(ex.value) is OSError
     assert ex.value.errno == ELOOP
-    assert _snapshot(tmp_path) == before
+    assert snapshot(tmp_path) == before
 
 
 def test_press_raises_for_symlink_to_directory_within(
@@ -1425,6 +1430,65 @@ def test_press_raises_when_destination_is_file(
     assert ex.value.errno == ENOTDIR
     assert ex.value.filename == str(destination)
     assert (tmp_path / "build.md").read_text(encoding="utf-8") == "Not a directory\n"
+
+
+@mark.parametrize(
+    ("method", "destination", "expect_destination"),
+    [
+        ("press_file", "values.yaml", "values.yaml"),
+        ("press_file", "link.yaml", "link.yaml"),
+        ("press_file", "hard.yaml", "hard.yaml"),
+        ("press_file", "missing/../values.yaml", "missing/../values.yaml"),
+        ("press_directory", ".", "doc.md"),
+    ],
+    ids=[
+        "file to same path",
+        "file to symlink",
+        "file to hard link",
+        "file through missing directory",
+        "directory",
+    ],
+)
+def test_press_raises_when_destination_is_protected(
+    method: str,
+    destination: str,
+    expect_destination: str,
+    tmp_path: Path,
+) -> None:
+    """
+    `press_file` and `press_directory` must raise `DestinationIsProtectedError` when a
+    destination is the same file as a protected file, by any name, and nothing must
+    change.
+    """
+    templates_dir = tmp_path / "templates"
+    templates_dir.mkdir()
+    (templates_dir / "doc.md").write_text("{{ greeting }}\n", encoding="utf-8")
+    (tmp_path / "values.yaml").write_text("greeting: Hello\n", encoding="utf-8")
+    (tmp_path / "link.yaml").symlink_to("values.yaml")
+    link(tmp_path / "values.yaml", tmp_path / "hard.yaml")
+    link(tmp_path / "values.yaml", tmp_path / "doc.md")
+
+    platen = Platen(
+        templates_dir,
+        {"greeting": "Hello"},
+        protect=[tmp_path / "values.yaml"],
+    )
+
+    press = platen.press_file if method == "press_file" else platen.press_directory
+    template = "doc.md" if method == "press_file" else "."
+    before = snapshot(tmp_path)
+
+    expect = (
+        f"Destination '{tmp_path / expect_destination}' is the same file as "
+        f"protected file '{tmp_path / 'values.yaml'}'"
+    )
+
+    with raises(DestinationIsProtectedError, match=escape(expect)) as ex:
+        press(template, tmp_path / destination)
+
+    assert ex.value.destination_path == tmp_path / expect_destination
+    assert ex.value.protected_path == tmp_path / "values.yaml"
+    assert snapshot(tmp_path) == before
 
 
 @mark.parametrize(
@@ -1523,7 +1587,7 @@ def test_press_raises_when_destination_is_template(
     )
 
     press = platen.press_file if method == "press_file" else platen.press_directory
-    before = _snapshot(tmp_path)
+    before = snapshot(tmp_path)
 
     expect = (
         f"Destination '{tmp_path / expect_destination}' is the same file as "
@@ -1535,7 +1599,7 @@ def test_press_raises_when_destination_is_template(
 
     assert ex.value.destination_path == tmp_path / expect_destination
     assert ex.value.template_path == platen.templates_dir / expect_template
-    assert _snapshot(tmp_path) == before
+    assert snapshot(tmp_path) == before
 
 
 @mark.parametrize(
@@ -1624,7 +1688,7 @@ def test_press_raises_when_destination_is_within_pressed_directory(
         {"greeting": "Hello"},
     )
 
-    before = _snapshot(tmp_path)
+    before = snapshot(tmp_path)
 
     expect = (
         f"Destination '{tmp_path / expect_destination}' is within "
@@ -1639,7 +1703,7 @@ def test_press_raises_when_destination_is_within_pressed_directory(
 
     assert ex.value.destination_path == tmp_path / expect_destination
     assert ex.value.directory == tmp_path / expect_directory
-    assert _snapshot(tmp_path) == before
+    assert snapshot(tmp_path) == before
 
 
 def test_press_reads_empty_path_object_as_working_directory(
