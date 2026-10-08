@@ -1,0 +1,5 @@
+# {{ name }}
+
+{% include "_badge.txt" %}
+
+Pressed from a template.

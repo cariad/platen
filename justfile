@@ -12,6 +12,9 @@ lint:
 markdown:
     uv run rumdl check .
 
+start-docs:
+  uv run zensical serve
+
 typing:
     uv run pyright
 

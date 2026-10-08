@@ -9,8 +9,7 @@ values = YAML(typ="safe").load(here / "tasks.yaml")
 
 platen = Platen(
     here / "templates",
-    here / "build",
     values,
 )
 
-platen.press()
+platen.press(here / "build")

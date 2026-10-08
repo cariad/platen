@@ -14,12 +14,13 @@ def test(
     platen: Platen,
 ) -> None:
     """
-    `Platen.press` must press every file in the templates directory.
+    `Platen.press_directory` must press every file in the templates directory
+    when it's given the templates directory itself.
 
     Every file within the templates directory must be pressed to the same
     relative path in the destination. Text files must be pressed and binary
     files must be copied, and nothing must be logged as a warning.
     """
-    platen.press(output_dir)
+    platen.press_directory(platen.templates_dir, output_dir)
     assert_output_matches_expect()
     assert not [r for r in caplog.records if r.levelno >= WARNING]

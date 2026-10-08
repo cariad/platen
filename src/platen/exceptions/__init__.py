@@ -1,9 +1,11 @@
-from .nested_directories_error import NestedDirectoriesError
+from .destination_is_template_error import DestinationIsTemplateError
+from .destination_within_directory_error import DestinationWithinDirectoryError
 from .platen_error import PlatenError
 from .template_not_in_directory_error import TemplateNotInDirectoryError
 
 __all__ = [
-    "NestedDirectoriesError",
+    "DestinationIsTemplateError",
+    "DestinationWithinDirectoryError",
     "PlatenError",
     "TemplateNotInDirectoryError",
 ]
