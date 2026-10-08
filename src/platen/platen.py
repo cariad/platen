@@ -1,13 +1,12 @@
-from collections.abc import Mapping
-from errno import EEXIST, EISDIR, ENOENT, ENOTDIR
+from collections.abc import Iterable, Mapping
 from functools import cache
 from logging import getLogger
-from os import PathLike, fspath, getcwd, stat, strerror
+from os import PathLike, fspath, getcwd, stat
 from os.path import basename, join, realpath
 from pathlib import Path
 from shutil import copyfile, copymode
 from stat import S_ISDIR
-from typing import Any, NamedTuple, TypeVar
+from typing import Any, NamedTuple
 
 from jinja2 import (
     Environment,
@@ -18,11 +17,12 @@ from jinja2 import (
 from mosey import Mosey
 
 from .exceptions import (
+    DestinationIsProtectedError,
     DestinationIsTemplateError,
     DestinationWithinDirectoryError,
     TemplateNotInDirectoryError,
 )
-from .files import identity, is_resolved_within, sniff
+from .files import identity, is_resolved_within, os_error, sniff
 from .types import Job
 
 IGNORE_FILENAME = ".platenignore"
@@ -33,16 +33,6 @@ See https://cariad.github.io/mosey/ignore-files/ for the rules.
 """
 
 log = getLogger(__name__)
-
-_E = TypeVar("_E", bound=OSError)
-
-_ERRNOS: dict[type[OSError], int] = {
-    FileExistsError: EEXIST,
-    FileNotFoundError: ENOENT,
-    IsADirectoryError: EISDIR,
-    NotADirectoryError: ENOTDIR,
-}
-"""The error number of each kind of `OSError` that Platen raises itself."""
 
 
 class _Arguments(NamedTuple):
@@ -95,7 +85,7 @@ def _assert_traversable(path: Path) -> None:
             is_dir = True
 
         if not is_dir:
-            raise _os_error(NotADirectoryError, path)
+            raise os_error(NotADirectoryError, path)
 
         current = Path(realpath(current / part))
 
@@ -145,35 +135,9 @@ def _not_empty(path: PathLike[str] | str) -> str:
     value = fspath(path)
 
     if not value:
-        raise _os_error(FileNotFoundError, value)
+        raise os_error(FileNotFoundError, value)
 
     return value
-
-
-def _os_error(
-    error: type[_E],
-    path: PathLike[str] | str,
-    other: PathLike[str] | str | None = None,
-    reason: str | None = None,
-) -> _E:
-    """
-    Make an `OSError` like the one the operating system would raise.
-
-    The error number and message come from the type of error, so they always agree.
-
-    Args:
-        error: Type of error to make.
-        path: Path that the error is about.
-        other: Another path that the error is about, if there is one.
-        reason: Why the error was raised, to add to the message, if it needs saying.
-
-    Returns:
-        The error.
-    """
-    code = _ERRNOS[error]
-    message = strerror(code) if reason is None else f"{strerror(code)} ({reason})"
-    filename2 = None if other is None else fspath(other)
-    return error(code, message, fspath(path), None, filename2)
 
 
 class Platen:
@@ -204,15 +168,26 @@ class Platen:
     Args:
         templates_dir: Path to the source templates directory.
         values: Values to press into the templates.
+        protect: Paths to files that must never be pressed over, like the file that the
+            values were read from.
+
+            Relative paths are relative to the working directory that Platen is
+            constructed in.
     """
 
     def __init__(
         self,
         templates_dir: PathLike[str] | str,
         values: Mapping[str, Any],
+        *,
+        protect: Iterable[PathLike[str] | str] = (),
     ) -> None:
         self._templates_dir = Path(realpath(templates_dir))
         self._values = values
+        # Anchor relative paths now, like the templates directory, so that changing the
+        # working directory before a press can't change which files are protected. They
+        # aren't resolved until each press, so that they're checked where they lead.
+        self._protect = tuple(Path(p).absolute() for p in protect)
 
         self._env = Environment(
             autoescape=select_autoescape(),
@@ -270,7 +245,7 @@ class Platen:
                 within = self._templates_dir / part
 
                 if within.is_symlink():
-                    raise _os_error(
+                    raise os_error(
                         NotADirectoryError,
                         within,
                         reason="Platen never walks into symlinks",
@@ -298,6 +273,8 @@ class Platen:
                 template is being pressed.
 
         Raises:
+            DestinationIsProtectedError: When a job's destination is the same file as a
+                protected file.
             DestinationIsTemplateError: When a job's destination is the same file as any
                 job's template.
             DestinationWithinDirectoryError: When a job's destination, followed through
@@ -310,6 +287,7 @@ class Platen:
                 another job's destination.
         """
         templates: dict[tuple[int, int], Path] = {}
+        protected: dict[tuple[int, int], Path] = {}
         results = {job.resolved for job in jobs}
         claimed: dict[Path | tuple[int, int], Path] = {}
         walked: tuple[int, int] | None = None
@@ -320,7 +298,7 @@ class Platen:
             walked = identity(directory)
 
             if walked is None:
-                raise _os_error(FileNotFoundError, directory)
+                raise os_error(FileNotFoundError, directory)
 
         @cache
         def leads_within(parent: Path) -> bool:
@@ -335,6 +313,11 @@ class Platen:
             # `FileNotFoundError`.
             if (found := identity(template)) is not None:
                 templates[found] = template
+
+        for path in self._protect:
+            # Likewise, a protected file that doesn't exist can't be overwritten.
+            if (found := identity(path)) is not None:
+                protected[found] = path
 
         for job in jobs:
             # A press must never write within the directory it walks, even when a
@@ -351,10 +334,13 @@ class Platen:
             if found in templates:
                 raise DestinationIsTemplateError(templates[found], job.destination)
 
+            if found in protected:
+                raise DestinationIsProtectedError(protected[found], job.destination)
+
             # Check where the destination really leads now, rather than let the
             # operating system fail partway through writing.
             if job.resolved.is_dir():
-                raise _os_error(IsADirectoryError, job.destination)
+                raise os_error(IsADirectoryError, job.destination)
 
             # `_write` creates the destination's resolved parent, so the nearest parent
             # that already exists must be a directory.
@@ -364,7 +350,7 @@ class Platen:
                 ancestor = ancestor.parent
 
             if not ancestor.is_dir():
-                raise _os_error(NotADirectoryError, job.destination)
+                raise os_error(NotADirectoryError, job.destination)
 
             # A destination that's a symlink leads elsewhere, and the operating system
             # creates the file there. That directory must already exist, unless `_write`
@@ -373,14 +359,14 @@ class Platen:
 
             if within not in (job.parent, *job.parent.parents) and not within.is_dir():
                 error = NotADirectoryError if within.exists() else FileNotFoundError
-                raise _os_error(error, job.destination)
+                raise os_error(error, job.destination)
 
             # A symlink within the destination could lead into another job's result,
             # which would then be in the way of a directory. On a case-insensitive file
             # system, a spelling that differs from the result only in case is caught
             # above once the result exists, but not on the press that first creates it.
             if any(p in results for p in job.resolved.parents):
-                raise _os_error(NotADirectoryError, job.destination)
+                raise os_error(NotADirectoryError, job.destination)
 
             # Two jobs mustn't be pressed to the same file, or one result would
             # overwrite the other. Compare where the destinations lead, and the files
@@ -388,7 +374,7 @@ class Platen:
             for key in (job.resolved, found):
                 if key is not None:
                     if key in claimed:
-                        raise _os_error(FileExistsError, job.destination, claimed[key])
+                        raise os_error(FileExistsError, job.destination, claimed[key])
 
                     claimed[key] = job.destination
 
@@ -483,7 +469,7 @@ class Platen:
             raise DestinationWithinDirectoryError(path, destination)
 
         if resolved.exists() and not resolved.is_dir():
-            raise _os_error(NotADirectoryError, destination)
+            raise os_error(NotADirectoryError, destination)
 
         # Mosey never reads ignore-files above the directory it walks, so walk the whole
         # templates directory and keep only the files within the requested directory.
@@ -644,6 +630,9 @@ class Platen:
                 working directory, or absolute.
 
         Raises:
+            DestinationIsProtectedError: When a destination is the same file as a
+                protected file, by any name.
+
             DestinationIsTemplateError: When a destination is the same file as a
                 template that's being pressed, including through a symlink, a hard link,
                 or a spelling that a case-insensitive file system treats as the same
@@ -681,7 +670,7 @@ class Platen:
         arguments = self._arguments(directory, destination, refuse_symlinks=True)
 
         if not arguments.is_dir:
-            raise _os_error(NotADirectoryError, arguments.path)
+            raise os_error(NotADirectoryError, arguments.path)
 
         destination_path = Path(arguments.destination).absolute()
         _assert_traversable(destination_path)
@@ -739,6 +728,9 @@ class Platen:
                 directory, or absolute.
 
         Raises:
+            DestinationIsProtectedError: When `destination` is the same file as a
+                protected file, by any name.
+
             DestinationIsTemplateError: When `destination` is the same file as
                 `template`, including through a symlink, a hard link, or a spelling that
                 a case-insensitive file system treats as the same name.
@@ -771,13 +763,13 @@ class Platen:
         arguments = self._arguments(template, destination, refuse_symlinks=False)
 
         if arguments.is_dir:
-            raise _os_error(IsADirectoryError, arguments.path)
+            raise os_error(IsADirectoryError, arguments.path)
 
         # A destination like "build/", "build/." or "build/x/.." names a directory, but
         # `pathlib` would drop the trailing separator from "build/" and press a file
         # named "build".
         if basename(arguments.destination) in ("", ".", ".."):
-            raise _os_error(
+            raise os_error(
                 IsADirectoryError,
                 join(getcwd(), arguments.destination),
             )

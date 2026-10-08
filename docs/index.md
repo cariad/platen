@@ -164,6 +164,36 @@ This will press every template into the build directory:
     </html>
     ```
 
+## Command line
+
+Installing Platen also installs the `platen` command. To install only the command, run `uv tool install platen` or `pipx install platen`.
+
+The command presses one template:
+
+```text
+platen TEMPLATE VALUES OUTPUT
+```
+
+For example, to press `README.template` to `README.md` with the values in `values.yaml`:
+
+```shell
+platen README.template values.yaml README.md
+```
+
+- The template's directory is the templates directory, so the templates that it includes are found relative to it. A template that's a symlink must lead to a file within the symlink's own directory.
+- The values file is read as YAML, whatever its name, and must hold a mapping of names to values. An empty file holds no values.
+- The output can have any name, and missing directories are created. It can't be the template or the values file, by any name. Templates that the template includes or extends aren't protected, so take care not to press over them.
+
+Platen prints nothing when it succeeds. Otherwise, it prints a one-line error and exits with `1`, or prints its usage too and exits with `2` when the arguments are wrong. When it's interrupted, it stops quietly with `130`.
+
+An error looks like this:
+
+```text
+platen: error: 'name' is undefined (README.template, line 1)
+```
+
+Like any press, the template is checked and rendered before anything is written, so a template that fails to render, or an output that's refused, leaves nothing half-pressed. Only an error while writing, like a full disk, can leave missing directories created or the output part-written.
+
 ## Choosing what to press, and where
 
 Platen has three ways to press:
@@ -230,7 +260,9 @@ Platen checks every press before it writes anything, and refuses one that would 
 
 - `press` and `press_directory` never press two templates to the same file, like through a symlink or hard link within the destination, so one result can't overwrite another. They raise `FileExistsError` instead.
 
-`DestinationIsTemplateError` and `DestinationWithinDirectoryError` are subclasses of `PlatenError` and `ValueError`.
+- It never presses to a destination that's the same file as one that you ask it to protect, by any name. Pass the paths to protect, like the file that your values were read from, as `Platen(templates_dir, values, protect=[values_path])`. Relative paths are relative to your working directory when you create the `Platen`. It raises `DestinationIsProtectedError` instead.
+
+`DestinationIsProtectedError`, `DestinationIsTemplateError` and `DestinationWithinDirectoryError` are subclasses of `PlatenError` and `ValueError`.
 
 Platen also renders every template, and checks that nothing is in the way of its results, before it writes anything. So a template that fails to render, or a file in the way of a directory, leaves nothing half-pressed.
 

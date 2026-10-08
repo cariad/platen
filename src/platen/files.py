@@ -1,7 +1,9 @@
-from os import stat
+from errno import EEXIST, EISDIR, ENOENT, ENOTDIR
+from os import PathLike, fspath, stat, strerror
 from os.path import realpath
 from pathlib import Path
 from re import search
+from typing import TypeVar
 
 from .types import LineEnding, Sniff
 
@@ -12,6 +14,16 @@ Number of bytes to sniff to learn about a file.
 This must remain at least 8,000. Like Git, we'll assume a file is binary
 if it contains a NUL (b"\0") character in the first 8,000 bytes.
 """
+
+_E = TypeVar("_E", bound=OSError)
+
+_ERRNOS: dict[type[OSError], int] = {
+    FileExistsError: EEXIST,
+    FileNotFoundError: ENOENT,
+    IsADirectoryError: EISDIR,
+    NotADirectoryError: ENOTDIR,
+}
+"""The error number of each kind of `OSError` that Platen raises itself."""
 
 _LINE_ENDING_PATTERN = b"|".join(
     e.encode() for e in sorted(LineEnding, key=len, reverse=True)
@@ -131,6 +143,32 @@ def is_within(path: Path, directory: Path) -> bool:
     # 3.12, but `realpath` never raises, so a loop fails the same way on every version:
     # with `OSError` when the looping path is identified.
     return is_resolved_within(Path(realpath(path)), identity(directory))
+
+
+def os_error(
+    error: type[_E],
+    path: PathLike[str] | str,
+    other: PathLike[str] | str | None = None,
+    reason: str | None = None,
+) -> _E:
+    """
+    Make an `OSError` like the one the operating system would raise.
+
+    The error number and message come from the type of error, so they always agree.
+
+    Args:
+        error: Type of error to make.
+        path: Path that the error is about.
+        other: Another path that the error is about, if there is one.
+        reason: Why the error was raised, to add to the message, if it needs saying.
+
+    Returns:
+        The error.
+    """
+    code = _ERRNOS[error]
+    message = strerror(code) if reason is None else f"{strerror(code)} ({reason})"
+    filename2 = None if other is None else fspath(other)
+    return error(code, message, fspath(path), None, filename2)
 
 
 def sniff(path: Path) -> Sniff:
