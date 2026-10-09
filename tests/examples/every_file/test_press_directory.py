@@ -19,8 +19,9 @@ def test(
 
     Every file within the templates directory must be pressed to the same
     relative path in the destination. Text files must be pressed and binary
-    files must be copied, and nothing must be logged as a warning.
+    files must be copied. The number of files must be returned, and nothing
+    must be logged as a warning.
     """
-    platen.press_directory(platen.templates_dir, output_dir)
+    assert platen.press_directory(platen.templates_dir, output_dir) == 5
     assert_output_matches_expect()
     assert not [r for r in caplog.records if r.levelno >= WARNING]

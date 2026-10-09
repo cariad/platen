@@ -168,7 +168,7 @@ This will press every template into the build directory:
 
 Installing Platen also installs the `platen` command. To install only the command, run `uv tool install platen` or `pipx install platen`.
 
-The command presses one template:
+The command presses a template, or a directory of templates:
 
 ```text
 platen TEMPLATE VALUES OUTPUT
@@ -180,19 +180,28 @@ For example, to press `README.template` to `README.md` with the values in `value
 platen README.template values.yaml README.md
 ```
 
-- The template's directory is the templates directory, so the templates that it includes are found relative to it. A template that's a symlink must lead to a file within the symlink's own directory.
+Or to press every template in the `templates` directory into the `build` directory:
+
+```shell
+platen templates values.yaml build
+```
+
 - The values file is read as YAML, whatever its name, and must hold a mapping of names to values. An empty file holds no values.
-- The output can have any name, and missing directories are created. It can't be the template or the values file, by any name. Templates that the template includes or extends aren't protected, so take care not to press over them.
+- A template's directory is the templates directory, so the templates that it includes are found relative to it. A template that's a symlink must lead to a file within the symlink's own directory.
+- A template's output can have any name, and missing directories are created. It can't be the template or the values file, by any name. Templates that the template includes or extends aren't protected, so take care not to press over them.
+- A directory of templates is the templates directory, and it's pressed like `press()`: every template within it is pressed to the same path within the output, binary files are copied, `.platenignore` files apply, and included templates are found relative to the directory. Symlinks to files within it are pressed with their targets' content, wherever they lead. A symlink to a directory, a FIFO or a device, or a broken one, stops the press unless a `.platenignore` file lists it.
+- A directory's output is a directory, and it's created if it's missing. It can't be within the directory being pressed, and nothing in it is ever deleted. If the values file is within the directory, list it in a `.platenignore` file, or it'll be pressed as a template too. Keep your templates in a directory of their own, rather than `.`, as [pressing a directory](#pressing-a-directory) explains.
 
-Platen prints nothing when it succeeds. Otherwise, it prints a one-line error and exits with `1`, or prints its usage too and exits with `2` when the arguments are wrong. When it's interrupted, it stops quietly with `130`.
+Platen prints nothing when it succeeds, unless a directory has nothing to press because it's empty or everything in it is ignored. Then, it prints a warning and still exits with `0`. When it fails, it prints a one-line error and exits with `1`, or prints its usage too and exits with `2` when the arguments are wrong. When it's interrupted, it stops quietly with `130`.
 
-An error looks like this:
+Warnings and errors look like this:
 
 ```text
+platen: warning: Nothing to press in 'templates': it's empty, or everything in it is ignored
 platen: error: 'name' is undefined (README.template, line 1)
 ```
 
-Like any press, the template is checked and rendered before anything is written, so a template that fails to render, or an output that's refused, leaves nothing half-pressed. Only an error while writing, like a full disk, can leave missing directories created or the output part-written.
+Like any press, every template is checked and rendered before anything is written, so a template that fails to render, or an output that's refused, leaves nothing half-pressed. Only an error while writing, like a full disk, can leave missing directories created, or outputs written or part-written.
 
 ## Choosing what to press, and where
 
@@ -216,7 +225,7 @@ Each method is strict about what it's given, rather than guessing:
 | `press_directory` | A directory's templates into a directory | A directory that's a file or a symlink, or a destination that's a file (`NotADirectoryError`) |
 | `press_file`      | One template to a file                   | A template or destination that's a directory (`IsADirectoryError`)                            |
 
-Missing directories are created, existing files are overwritten, and nothing is ever deleted.
+Missing directories are created, existing files are overwritten, and nothing is ever deleted. `press` and `press_directory` return the number of templates that they pressed or copied, which is `0` when there's nothing to press.
 
 ### Pressing a directory
 
@@ -262,7 +271,9 @@ Platen checks every press before it writes anything, and refuses one that would 
 
 - It never presses to a destination that's the same file as one that you ask it to protect, by any name. Pass the paths to protect, like the file that your values were read from, as `Platen(templates_dir, values, protect=[values_path])`. Relative paths are relative to your working directory when you create the `Platen`. It raises `DestinationIsProtectedError` instead.
 
-`DestinationIsProtectedError`, `DestinationIsTemplateError` and `DestinationWithinDirectoryError` are subclasses of `PlatenError` and `ValueError`.
+- It never reads a template that isn't a regular file, like a FIFO, which would block, or a device like `/dev/zero`, which might never end, even through a symlink. Nor does it press a text template that isn't UTF-8, even one that's only included, extended or imported. It raises `TemplateNotPressableError` instead.
+
+`DestinationIsProtectedError`, `DestinationIsTemplateError`, `DestinationWithinDirectoryError` and `TemplateNotPressableError` are subclasses of `PlatenError` and `ValueError`.
 
 Platen also renders every template, and checks that nothing is in the way of its results, before it writes anything. So a template that fails to render, or a file in the way of a directory, leaves nothing half-pressed.
 
@@ -272,7 +283,7 @@ Platen also renders every template, and checks that nothing is in the way of its
 
 ## Binary files
 
-Text files are pressed as templates. Binary files, like images, can't be templates, so they're copied to their destination as-is.
+Text files are pressed as templates, and must be UTF-8. Binary files, like images, can't be templates, so they're copied to their destination as-is.
 
 ## Ignoring files
 
