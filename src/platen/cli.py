@@ -443,14 +443,16 @@ def _template_as_given(
             directory is being pressed.
 
     Returns:
-        The template as it was given, when it was named, or else the template within
-        the directory as it was given.
+        The template as it was given, when it's the template that was named, or else
+        the template within the directory as it was given, like one that the named
+        template references.
     """
-    if name is not None:
-        # Only the template that was named is pressed.
+    named = _in_templates_dir(str(path), directory)
+
+    if name is not None and named == join(directory, name):
         return template
 
-    return _in_templates_dir(str(path), directory)
+    return named
 
 
 def _templates_dir(directory: str) -> Path:

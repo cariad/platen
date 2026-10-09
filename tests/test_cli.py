@@ -628,23 +628,46 @@ def test_refuses_directory_template_that_cannot_be_rendered(
     _assert_fails(capsys, project, ["templates", "values.yaml", "build"], message)
 
 
+@mark.parametrize(
+    ("page", "location"),
+    [
+        (None, ""),
+        ('Hello\n{% include "notes/legacy.txt" %}\n', " (templates/page.md, line 2)"),
+    ],
+    ids=[
+        "pressed",
+        "included",
+    ],
+)
 def test_refuses_directory_template_that_is_not_utf8(
+    page: str | None,
+    location: str,
     capsys: CaptureFixture[str],
     project: Path,
 ) -> None:
     """
     A text template within the directory that isn't UTF-8 must be refused, naming it
-    within the directory as it was given, and the problem.
+    within the directory as it was given, and the problem, and where it's included
+    when it's only included.
     """
     (project / "templates" / "notes").mkdir(parents=True)
     (project / "templates" / "notes" / "legacy.txt").write_bytes(b"Caf\xe9\n")
+
+    if page is not None:
+        # Ignore the template, so that it's only loaded through the include.
+        (project / "templates" / ".platenignore").write_text(
+            "notes/\n",
+            encoding="utf-8",
+        )
+
+        (project / "templates" / "page.md").write_text(page, encoding="utf-8")
 
     _assert_fails(
         capsys,
         project,
         ["templates", "values.yaml", "build"],
         "Template 'templates/notes/legacy.txt' can't be pressed: it isn't valid UTF-8 "
-        "(invalid continuation byte at byte 3)",
+        f"(invalid continuation byte at byte 3){location}",
     )
 
 
@@ -1303,6 +1326,47 @@ def test_refuses_template_that_is_not_a_file_or_directory(
         [template.format(cwd=project), "values.yaml", "out.md"],
         message.format(cwd=project),
     )
+
+
+@mark.parametrize(
+    ("template", "message"),
+    [
+        (
+            "docs//_legacy.txt",
+            "Template 'docs//_legacy.txt' can't be pressed: it isn't valid UTF-8 "
+            "(invalid continuation byte at byte 3)",
+        ),
+        (
+            "docs/page.template",
+            "Template 'docs/_legacy.txt' can't be pressed: it isn't valid UTF-8 "
+            "(invalid continuation byte at byte 3) (docs/page.template, line 2)",
+        ),
+    ],
+    ids=[
+        "pressed",
+        "included",
+    ],
+)
+def test_refuses_template_that_is_not_utf8(
+    template: str,
+    message: str,
+    capsys: CaptureFixture[str],
+    project: Path,
+) -> None:
+    """
+    A template that isn't UTF-8 must be refused, naming it exactly as it was given, or
+    a template that it includes that isn't UTF-8 must be refused, naming that template
+    relative to the template's directory as it was given, and where it's included.
+    """
+    (project / "docs").mkdir()
+    (project / "docs" / "_legacy.txt").write_bytes(b"Caf\xe9\n")
+
+    (project / "docs" / "page.template").write_text(
+        'Hello\n{% include "_legacy.txt" %}\n',
+        encoding="utf-8",
+    )
+
+    _assert_fails(capsys, project, [template, "values.yaml", "out.md"], message)
 
 
 def test_refuses_template_that_leads_outside_directory(

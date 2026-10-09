@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from functools import cache
 from logging import getLogger
 from os import PathLike, fspath, getcwd, stat
@@ -14,6 +14,7 @@ from jinja2 import (
     StrictUndefined,
     select_autoescape,
 )
+from jinja2.loaders import split_template_path
 from mosey import Mosey
 
 from .exceptions import (
@@ -56,6 +57,43 @@ class _Arguments(NamedTuple):
 
     rel: Path
     """`path`, relative to the source templates directory."""
+
+
+class _Loader(FileSystemLoader):
+    """
+    Loads templates like `FileSystemLoader`, but names a template that isn't UTF-8.
+
+    Every template is loaded through here, whether it's pressed or referenced (by
+    `extends`, `include`, `import`, etc) while another is rendered.
+    """
+
+    def get_source(
+        self,
+        environment: Environment,
+        template: str,
+    ) -> tuple[str, str, Callable[[], bool]]:
+        """
+        Load a template's source.
+
+        Args:
+            environment: The environment that's loading the template.
+            template: Name of the template, relative to the source templates directory.
+
+        Returns:
+            The template's source, its file name, and a function that says whether the
+            file is unchanged.
+
+        Raises:
+            TemplateNotPressableError: When the template isn't UTF-8.
+        """
+        try:
+            return super().get_source(environment, template)
+        except UnicodeDecodeError as error:
+            # Jinja reads templates as UTF-8, and its error doesn't name the file. Name
+            # the file that Jinja read, from the only directory that it searches.
+            path = Path(self.searchpath[0], *split_template_path(template))
+            reason = f"it isn't valid UTF-8 ({error.reason} at byte {error.start})"
+            raise TemplateNotPressableError(path, reason) from error
 
 
 def _assert_traversable(path: Path) -> None:
@@ -193,7 +231,7 @@ class Platen:
         self._env = Environment(
             autoescape=select_autoescape(),
             keep_trailing_newline=True,
-            loader=FileSystemLoader(self._templates_dir),
+            loader=_Loader(self._templates_dir),
             lstrip_blocks=True,
             trim_blocks=True,
             undefined=StrictUndefined,
@@ -535,7 +573,8 @@ class Platen:
             must be copied as-is.
 
         Raises:
-            TemplateNotPressableError: When the template is text, but not UTF-8.
+            TemplateNotPressableError: When the template, or a template that it
+                references, is text but not UTF-8.
         """
         template = self._templates_dir / name
 
@@ -543,15 +582,7 @@ class Platen:
             return None
 
         log.debug("Pressing %s", template)
-
-        try:
-            loaded = self._env.get_template(name)
-        except UnicodeDecodeError as error:
-            # Jinja reads templates as UTF-8, and its error doesn't name the file.
-            reason = f"it isn't valid UTF-8 ({error.reason} at byte {error.start})"
-            raise TemplateNotPressableError(template, reason) from error
-
-        return loaded.render(self._values)
+        return self._env.get_template(name).render(self._values)
 
     def _write(self, job: Job, body: str | None) -> None:
         """
@@ -710,7 +741,8 @@ class Platen:
 
             TemplateNotPressableError: When `directory` holds a template that's neither
                 a regular file nor a directory, like a symlink to a FIFO or a device, or
-                a text template that isn't UTF-8. Nothing has been written.
+                when a text template isn't UTF-8, even one that's only referenced.
+                Nothing has been written.
 
             jinja2.TemplateError: When a template can't be rendered. Nothing has been
                 written.
@@ -808,8 +840,8 @@ class Platen:
                 that directory.
 
             TemplateNotPressableError: When `template` is neither a regular file nor a
-                directory, like a FIFO or a device, or it's text that isn't UTF-8.
-                Nothing has been written.
+                directory, like a FIFO or a device, or when it, or a template that it
+                references, is text that isn't UTF-8. Nothing has been written.
 
             jinja2.TemplateError: When the template can't be rendered. Nothing has been
                 written.

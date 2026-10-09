@@ -271,7 +271,7 @@ Platen checks every press before it writes anything, and refuses one that would 
 
 - It never presses to a destination that's the same file as one that you ask it to protect, by any name. Pass the paths to protect, like the file that your values were read from, as `Platen(templates_dir, values, protect=[values_path])`. Relative paths are relative to your working directory when you create the `Platen`. It raises `DestinationIsProtectedError` instead.
 
-- It never reads a template that isn't a regular file, like a FIFO, which would block, or a device like `/dev/zero`, which might never end, even through a symlink. Nor does it press a text template that isn't UTF-8. It raises `TemplateNotPressableError` instead.
+- It never reads a template that isn't a regular file, like a FIFO, which would block, or a device like `/dev/zero`, which might never end, even through a symlink. Nor does it press a text template that isn't UTF-8, even one that's only included, extended or imported. It raises `TemplateNotPressableError` instead.
 
 `DestinationIsProtectedError`, `DestinationIsTemplateError`, `DestinationWithinDirectoryError` and `TemplateNotPressableError` are subclasses of `PlatenError` and `ValueError`.
 

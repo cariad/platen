@@ -1525,18 +1525,39 @@ def test_press_raises_for_symlink_to_special_file(
     assert not output_dir.exists()
 
 
+@mark.parametrize(
+    "page",
+    [
+        None,
+        '{% extends "_legacy.txt" %}\n',
+        '{% import "_legacy.txt" as legacy %}\n',
+        '{% include "_legacy.txt" %}\n',
+    ],
+    ids=[
+        "pressed",
+        "extended",
+        "imported",
+        "included",
+    ],
+)
 def test_press_raises_for_template_that_is_not_utf8(
+    page: str | None,
     output_dir: Path,
     tmp_path: Path,
 ) -> None:
     """
     `press` must refuse a text template that isn't UTF-8, naming it and the problem,
-    and write nothing.
+    and write nothing, whether it's pressed or only referenced by another template.
     """
     templates_dir = tmp_path / "source"
     templates_dir.mkdir()
     (templates_dir / "a.md").write_text("A\n", encoding="utf-8")
-    (templates_dir / "legacy.txt").write_bytes(b"Caf\xe9\n")
+    (templates_dir / "_legacy.txt").write_bytes(b"Caf\xe9\n")
+
+    if page is not None:
+        # Ignore the template, so that it's only loaded through the reference.
+        (templates_dir / ".platenignore").write_text("_legacy.txt\n", encoding="utf-8")
+        (templates_dir / "page.md").write_text(page, encoding="utf-8")
 
     platen = Platen(
         templates_dir,
@@ -1546,7 +1567,7 @@ def test_press_raises_for_template_that_is_not_utf8(
     with raises(TemplateNotPressableError) as ex:
         platen.press(output_dir)
 
-    assert ex.value.template_path == platen.templates_dir / "legacy.txt"
+    assert ex.value.template_path == platen.templates_dir / "_legacy.txt"
     assert ex.value.reason == (
         "it isn't valid UTF-8 (invalid continuation byte at byte 3)"
     )
