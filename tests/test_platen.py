@@ -1,6 +1,7 @@
+import os
 from errno import EEXIST, EISDIR, ELOOP, ENOENT, ENOTDIR
 from logging import WARNING
-from os import getcwd, link, strerror
+from os import W_OK, access, getcwd, link, strerror
 from os.path import exists, join, realpath
 from pathlib import Path
 from re import escape
@@ -15,6 +16,7 @@ from platen import (
     DestinationWithinDirectoryError,
     Platen,
     TemplateNotInDirectoryError,
+    TemplateNotPressableError,
 )
 from platen.files import identity
 from tests.snapshots import snapshot
@@ -451,8 +453,8 @@ def test_press_directory_warns_when_directory_has_nothing_to_press(
     tmp_path: Path,
 ) -> None:
     """
-    `press_directory` must log a warning when a directory holds nothing to press, even
-    when other directories do.
+    `press_directory` must log a warning and return 0 when a directory holds nothing to
+    press, even when other directories do.
 
     A directory holds nothing to press when it's empty, when it's ignored, or when
     everything in it is ignored.
@@ -477,7 +479,9 @@ def test_press_directory_warns_when_directory_has_nothing_to_press(
     )
 
     with caplog.at_level(WARNING, logger="platen"):
-        platen.press_directory(directory, output_dir / directory)
+        pressed = platen.press_directory(directory, output_dir / directory)
+
+    assert pressed == 0
 
     expect = (
         f"Nothing to press in {platen.templates_dir / directory}: it's "
@@ -993,6 +997,38 @@ def test_press_file_raises_when_template_is_not_as_named(
     assert not output_dir.exists()
 
 
+def test_press_file_raises_when_template_is_not_regular_file(tmp_path: Path) -> None:
+    """
+    `press_file` must refuse a template that's a FIFO before reading it, because reading
+    it would block, and write nothing.
+    """
+    # Not every platform has FIFOs, like Windows.
+    if not hasattr(os, "mkfifo"):
+        skip("This platform doesn't have FIFOs")
+
+    templates_dir = tmp_path / "source"
+    templates_dir.mkdir()
+    os.mkfifo(templates_dir / "pipe")
+
+    platen = Platen(
+        templates_dir,
+        {},
+    )
+
+    with raises(TemplateNotPressableError) as ex:
+        platen.press_file("pipe", tmp_path / "out.md")
+
+    assert ex.value.template_path == platen.templates_dir / "pipe"
+    assert ex.value.reason == "it isn't a regular file"
+
+    assert str(ex.value) == (
+        f"Template '{platen.templates_dir / 'pipe'}' can't be pressed: it isn't a "
+        "regular file"
+    )
+
+    assert not (tmp_path / "out.md").exists()
+
+
 @mark.parametrize(
     "body",
     [
@@ -1238,6 +1274,40 @@ def test_press_protects_relative_path_from_construction_working_directory(
     assert values.read_text(encoding="utf-8") == "greeting: Hello\n"
 
 
+def test_press_raises_for_destination_that_cannot_be_written(
+    output_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """
+    `press` must name a destination that can't be written as it was given, even when a
+    symlink within the destination leads elsewhere, like every other error about it.
+    """
+    templates_dir = tmp_path / "source"
+    (templates_dir / "sub").mkdir(parents=True)
+    (templates_dir / "sub" / "page.md").write_text("Page\n", encoding="utf-8")
+    directory = tmp_path / "ro"
+    directory.mkdir()
+    output_dir.mkdir()
+    (output_dir / "sub").symlink_to(directory)
+    directory.chmod(0o555)
+
+    try:
+        if access(directory, W_OK):
+            skip("Permissions don't stop this user from writing files")
+
+        platen = Platen(
+            templates_dir,
+            {},
+        )
+
+        with raises(PermissionError) as ex:
+            platen.press(output_dir)
+
+        assert ex.value.filename == str(output_dir / "sub" / "page.md")
+    finally:
+        directory.chmod(0o755)
+
+
 @mark.parametrize(
     ("method", "template", "destination"),
     [
@@ -1403,6 +1473,83 @@ def test_press_raises_for_symlink_to_directory_within(
         platen.press(output_dir)
 
     assert ex.value.filename == str(platen.templates_dir / "linked")
+    assert not output_dir.exists()
+
+
+@mark.parametrize(
+    "target",
+    [
+        "/dev/null",
+        "fifo",
+    ],
+    ids=[
+        "device",
+        "fifo",
+    ],
+)
+def test_press_raises_for_symlink_to_special_file(
+    target: str,
+    output_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """
+    `press` must refuse a walked symlink to a FIFO or a device before reading any
+    template, because reading a FIFO would block and reading a device might never end,
+    and write nothing.
+    """
+    if target == "fifo":
+        # Not every platform has FIFOs, like Windows.
+        if not hasattr(os, "mkfifo"):
+            skip("This platform doesn't have FIFOs")
+
+        os.mkfifo(tmp_path / target)
+        target = str(tmp_path / target)
+    elif not exists(target):
+        skip(f"This platform doesn't have {target}")
+
+    templates_dir = tmp_path / "source"
+    templates_dir.mkdir()
+    (templates_dir / "a.md").write_text("A\n", encoding="utf-8")
+    (templates_dir / "special").symlink_to(target)
+
+    platen = Platen(
+        templates_dir,
+        {},
+    )
+
+    with raises(TemplateNotPressableError) as ex:
+        platen.press(output_dir)
+
+    assert ex.value.template_path == platen.templates_dir / "special"
+    assert ex.value.reason == "it isn't a regular file"
+    assert not output_dir.exists()
+
+
+def test_press_raises_for_template_that_is_not_utf8(
+    output_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """
+    `press` must refuse a text template that isn't UTF-8, naming it and the problem,
+    and write nothing.
+    """
+    templates_dir = tmp_path / "source"
+    templates_dir.mkdir()
+    (templates_dir / "a.md").write_text("A\n", encoding="utf-8")
+    (templates_dir / "legacy.txt").write_bytes(b"Caf\xe9\n")
+
+    platen = Platen(
+        templates_dir,
+        {},
+    )
+
+    with raises(TemplateNotPressableError) as ex:
+        platen.press(output_dir)
+
+    assert ex.value.template_path == platen.templates_dir / "legacy.txt"
+    assert ex.value.reason == (
+        "it isn't valid UTF-8 (invalid continuation byte at byte 3)"
+    )
     assert not output_dir.exists()
 
 
@@ -1771,7 +1918,7 @@ def test_press_warns_when_everything_is_ignored(
     tmp_path: Path,
 ) -> None:
     """
-    `press` must log a warning when the whole templates directory holds
+    `press` must log a warning and return 0 when the whole templates directory holds
     nothing to press.
     """
     templates_dir = tmp_path / "source"
@@ -1786,7 +1933,9 @@ def test_press_warns_when_everything_is_ignored(
     )
 
     with caplog.at_level(WARNING, logger="platen"):
-        platen.press(output_dir)
+        pressed = platen.press(output_dir)
+
+    assert pressed == 0
 
     expect = (
         f"Nothing to press in {platen.templates_dir}: it's empty, or "

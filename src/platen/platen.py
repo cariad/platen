@@ -5,7 +5,7 @@ from os import PathLike, fspath, getcwd, stat
 from os.path import basename, join, realpath
 from pathlib import Path
 from shutil import copyfile, copymode
-from stat import S_ISDIR
+from stat import S_ISDIR, S_ISREG
 from typing import Any, NamedTuple
 
 from jinja2 import (
@@ -21,6 +21,7 @@ from .exceptions import (
     DestinationIsTemplateError,
     DestinationWithinDirectoryError,
     TemplateNotInDirectoryError,
+    TemplateNotPressableError,
 )
 from .files import identity, is_resolved_within, os_error, sniff
 from .types import Job
@@ -285,6 +286,8 @@ class Platen:
             IsADirectoryError: When a job's destination is a directory.
             NotADirectoryError: When a job's destination is within a file, or within
                 another job's destination.
+            TemplateNotPressableError: When a job's template is neither a regular file
+                nor a directory, like a symlink to a FIFO or a device.
         """
         templates: dict[tuple[int, int], Path] = {}
         protected: dict[tuple[int, int], Path] = {}
@@ -311,8 +314,18 @@ class Platen:
 
             # A template that doesn't exist can't be overwritten. Pressing it will raise
             # `FileNotFoundError`.
-            if (found := identity(template)) is not None:
-                templates[found] = template
+            if (found := identity(template)) is None:
+                continue
+
+            templates[found] = template
+
+            # Reading a FIFO would block, and reading a device might never end, so they
+            # must be refused before any template is read. Reading a directory raises
+            # `IsADirectoryError`. Look where `identity` looked.
+            mode = stat(realpath(template)).st_mode
+
+            if not S_ISREG(mode) and not S_ISDIR(mode):
+                raise TemplateNotPressableError(template, "it isn't a regular file")
 
         for path in self._protect:
             # Likewise, a protected file that doesn't exist can't be overwritten.
@@ -520,6 +533,9 @@ class Platen:
         Returns:
             The rendered document, or `None` when the template is a binary file that
             must be copied as-is.
+
+        Raises:
+            TemplateNotPressableError: When the template is text, but not UTF-8.
         """
         template = self._templates_dir / name
 
@@ -527,7 +543,15 @@ class Platen:
             return None
 
         log.debug("Pressing %s", template)
-        return self._env.get_template(name).render(self._values)
+
+        try:
+            loaded = self._env.get_template(name)
+        except UnicodeDecodeError as error:
+            # Jinja reads templates as UTF-8, and its error doesn't name the file.
+            reason = f"it isn't valid UTF-8 ({error.reason} at byte {error.start})"
+            raise TemplateNotPressableError(template, reason) from error
+
+        return loaded.render(self._values)
 
     def _write(self, job: Job, body: str | None) -> None:
         """
@@ -546,25 +570,37 @@ class Platen:
         job.parent.mkdir(exist_ok=True, parents=True)
         destination = job.parent / job.destination.name
 
-        if body is None:
-            log.debug("Copying binary file %s", template)
-            copyfile(template, destination)
-            log.info("Copied %s to %s", job.name, job.destination)
-        else:
-            destination.write_text(
-                body,
-                encoding="utf-8",
-                newline="\n",
-            )
+        try:
+            if body is None:
+                log.debug("Copying binary file %s", template)
+                copyfile(template, destination)
+                log.info("Copied %s to %s", job.name, job.destination)
+            else:
+                destination.write_text(
+                    body,
+                    encoding="utf-8",
+                    newline="\n",
+                )
 
-            log.info("Pressed %s to %s", job.name, job.destination)
+                log.info("Pressed %s to %s", job.name, job.destination)
 
-        # Replicate the original file permissions, but only on a regular file. A
-        # destination like `/dev/null` or a terminal must keep its own permissions.
-        if destination.is_file():
-            copymode(template, destination)
+            # Replicate the original file permissions, but only on a regular file. A
+            # destination like `/dev/null` or a terminal must keep its own permissions.
+            if destination.is_file():
+                copymode(template, destination)
+        except OSError as error:
+            if error.filename != str(destination):
+                raise
 
-    def press(self, destination: PathLike[str] | str) -> None:
+            # Name the destination as it was given, like every other error about it,
+            # rather than where it resolved to.
+            raise OSError(
+                error.errno,
+                error.strerror,
+                str(job.destination),
+            ) from error
+
+    def press(self, destination: PathLike[str] | str) -> int:
         """
         Press the values into every template within the source templates directory.
 
@@ -577,14 +613,18 @@ class Platen:
         Args:
             destination: Path to the directory to press into. Either relative to the
                 working directory, or absolute.
+
+        Returns:
+            The number of templates pressed or copied, which is 0 when there was nothing
+            to press.
         """
-        self.press_directory(".", destination)
+        return self.press_directory(".", destination)
 
     def press_directory(
         self,
         directory: PathLike[str] | str,
         destination: PathLike[str] | str,
-    ) -> None:
+    ) -> int:
         """
         Press the values into every template within a directory.
 
@@ -629,6 +669,10 @@ class Platen:
             destination: Path to the directory to press into. Either relative to the
                 working directory, or absolute.
 
+        Returns:
+            The number of templates pressed or copied, which is 0 when there was nothing
+            to press.
+
         Raises:
             DestinationIsProtectedError: When a destination is the same file as a
                 protected file, by any name.
@@ -664,6 +708,10 @@ class Platen:
             TemplateNotInDirectoryError: When `directory` is not a path within the
                 source templates directory, or a symlink leads it outside.
 
+            TemplateNotPressableError: When `directory` holds a template that's neither
+                a regular file nor a directory, like a symlink to a FIFO or a device, or
+                a text template that isn't UTF-8. Nothing has been written.
+
             jinja2.TemplateError: When a template can't be rendered. Nothing has been
                 written.
         """
@@ -682,9 +730,11 @@ class Platen:
                 "Nothing to press in %s: it's empty, or everything in it is ignored",
                 arguments.path,
             )
-            return
+
+            return 0
 
         self._press(jobs, arguments.path)
+        return len(jobs)
 
     def press_file(
         self,
@@ -756,6 +806,10 @@ class Platen:
                 directory so that referenced templates (`extends`,
                 `include`, `import`, etc) can be resolved relative to
                 that directory.
+
+            TemplateNotPressableError: When `template` is neither a regular file nor a
+                directory, like a FIFO or a device, or it's text that isn't UTF-8.
+                Nothing has been written.
 
             jinja2.TemplateError: When the template can't be rendered. Nothing has been
                 written.

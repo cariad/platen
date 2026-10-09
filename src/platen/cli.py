@@ -16,10 +16,11 @@ from ruamel.yaml.error import YAMLError
 from .exceptions import (
     DestinationIsProtectedError,
     DestinationIsTemplateError,
+    DestinationWithinDirectoryError,
     PlatenError,
     TemplateNotInDirectoryError,
+    TemplateNotPressableError,
 )
-from .files import os_error
 from .platen import Platen
 
 
@@ -35,19 +36,30 @@ def _as_given(
     """
     Name a path that an error names the way the user would know it.
 
-    Platen names paths absolutely, and within the directories that they resolve to.
+    Platen names paths absolutely, and within the directories that they resolve to. A
+    path that's the output, or one of its parents, is named as it was given. Otherwise,
+    a path is named relative to the deepest directory that it's within, as it was given:
+    the source templates directory, the output, or the directory that the output
+    resolves to.
 
     Args:
         path: Path that the error names.
         directory: Path to the source templates directory, as it was given.
-        output: Path to the file to press to, as it was given.
+        output: Path to the file or directory to press to, as it was given.
 
     Returns:
         The path as it was given, or `path` when it wasn't given.
     """
     try:
         spellings = _spellings(output)
-        templates_dir = Path(realpath(directory or "."))
+
+        # A directory press names its destinations within the output as it was given,
+        # but writes them within the directory that the output resolves to.
+        bases = (
+            (_templates_dir(directory), directory),
+            (Path(output).absolute(), output),
+            (Path(realpath(output)), output),
+        )
     except OSError:
         # Relative paths can't be compared without a working directory.
         return path
@@ -55,15 +67,31 @@ def _as_given(
     if path in spellings:
         return spellings[path]
 
-    if Path(path).is_relative_to(templates_dir):
-        return _name(path, templates_dir, directory)
+    named = Path(path)
 
-    return path
+    # Paths are compared as they're spelled, so a destination like
+    # "templates/../build/doc.md" starts with the templates directory without being
+    # within it.
+    within = [
+        (base, given)
+        for base, given in bases
+        if named.is_relative_to(base) and ".." not in named.relative_to(base).parts
+    ]
+
+    if not within:
+        return path
+
+    # The deepest directory names the path most closely, like a destination within an
+    # output that's within the source templates directory. The first wins a tie.
+    base, given = max(within, key=lambda b: len(b[0].parts))
+    return _name(path, base, given)
 
 
 def _describe(
     error: Exception,
     template: str,
+    directory: str,
+    name: str | None,
     values_path: str,
     output: str,
 ) -> str:
@@ -72,26 +100,47 @@ def _describe(
 
     Args:
         error: Error to describe.
-        template: Path to the template, as it was given.
+        template: Path to the template, or directory of templates, as it was given.
+        directory: Path to the source templates directory, as it was given.
+        name: Name of the template within the directory, or `None` when the whole
+            directory is being pressed.
         values_path: Path to the values file, as it was given.
-        output: Path to the file to press to, as it was given.
+        output: Path to the file or directory to press to, as it was given.
 
     Returns:
         The description.
     """
-    directory = dirname(template)
-
+    # Each path that a Platen error names is named by what it is, rather than by how
+    # it's spelled, so that a template is never named by the output's spelling.
     if isinstance(error, DestinationIsProtectedError):
+        destination = _as_given(str(error.destination_path), directory, output)
         message = (
-            f"Destination {output!r} is the same file as values file {values_path!r}"
+            f"Destination {destination!r} is the same file as values file "
+            f"{values_path!r}"
         )
     elif isinstance(error, DestinationIsTemplateError):
-        message = f"Destination {output!r} is the same file as template {template!r}"
+        destination = _as_given(str(error.destination_path), directory, output)
+        pressed = _template_as_given(error.template_path, template, directory, name)
+
+        message = (
+            f"Destination {destination!r} is the same file as template {pressed!r}"
+        )
+    elif isinstance(error, DestinationWithinDirectoryError):
+        destination = _as_given(str(error.destination_path), directory, output)
+        within = _in_templates_dir(str(error.directory), directory)
+
+        message = (
+            f"Destination {destination!r} is within {within!r}, the directory being "
+            "pressed"
+        )
     elif isinstance(error, TemplateNotInDirectoryError):
         message = (
             f"Template {template!r} leads to {str(error.template_path)!r}, outside its "
             f"directory {directory or '.'!r}"
         )
+    elif isinstance(error, TemplateNotPressableError):
+        pressed = _template_as_given(error.template_path, template, directory, name)
+        message = f"Template {pressed!r} can't be pressed: {error.reason}"
     elif isinstance(error, PlatenError):
         message = str(error)
     elif type(error) is TemplateNotFound:
@@ -100,8 +149,15 @@ def _describe(
     elif isinstance(error, TemplateError):
         message = error.message or type(error).__name__
     elif isinstance(error, OSError) and error.strerror is not None:
+        # The template is checked, and the values file opened, by the names they were
+        # given, so an error that names either exactly keeps that name, even when it's
+        # within another directory.
         paths = " -> ".join(
-            repr(_as_given(path, directory, output))
+            repr(
+                path
+                if path in (template, values_path)
+                else _as_given(path, directory, output)
+            )
             for path in (error.filename, error.filename2)
             if path is not None
         )
@@ -130,6 +186,28 @@ def _escape(path: str) -> str:
         The path, escaped like `repr` escapes it, but without quotes.
     """
     return repr(path)[1:-1]
+
+
+def _in_templates_dir(path: str, directory: str) -> str:
+    """
+    Name a path within the source templates directory the way the user would know it.
+
+    Args:
+        path: Absolute path within the source templates directory, or to the directory
+            itself.
+        directory: Path to the source templates directory, as it was given.
+
+    Returns:
+        The path, relative to the directory as it was given, or `path` when the
+        directory can't be found.
+    """
+    try:
+        templates_dir = _templates_dir(directory)
+    except OSError:
+        # Relative paths can't be compared without a working directory.
+        return path
+
+    return _name(path, templates_dir, directory)
 
 
 def _load_values(
@@ -175,6 +253,37 @@ def _load_values(
     return cast(Mapping[str, Any], values)
 
 
+def _locate(template: str) -> tuple[str, str | None]:
+    """
+    Find the source templates directory, and the template to press within it.
+
+    Args:
+        template: Path to the template, or directory of templates, to press.
+
+    Returns:
+        The source templates directory, as it was given, and the name of the template
+        within it. The name is `None` when `template` is the directory itself, so every
+        template within it must be pressed.
+
+    Raises:
+        _Error: When `template` is neither a directory nor a regular file.
+        OSError: When `template` can't be found or read.
+    """
+    # Check the template as it was given, so that the error names it that way, so that
+    # a path like "doc.md/" is refused rather than tidied up, and so that a template
+    # like a FIFO is refused before anything reads it.
+    mode = stat(template).st_mode
+
+    if S_ISDIR(mode):
+        return template, None
+
+    if not S_ISREG(mode):
+        raise _Error(f"Template {template!r} is neither a directory nor a regular file")
+
+    # The template is a file, so its name is never empty.
+    return split(template)
+
+
 def _location(
     error: BaseException,
     directory: str,
@@ -217,67 +326,71 @@ def _location(
     if not isabs(path):
         return None
 
-    templates_dir = Path(realpath(directory or "."))
-    return f"{_escape(_name(path, templates_dir, directory))}, line {line}"
+    return f"{_escape(_in_templates_dir(path, directory))}, line {line}"
 
 
 def _name(
     path: str,
-    templates_dir: Path,
-    directory: str,
+    base: Path,
+    given: str,
 ) -> str:
     """
-    Name a path within the source templates directory the way the user would know it.
+    Name a path within a directory the way the user would know it.
 
     Args:
-        path: Absolute path within the source templates directory.
-        templates_dir: Path to the source templates directory.
-        directory: Path to the source templates directory, as it was given.
+        path: Absolute path within the directory, or to the directory itself.
+        base: Path to the directory.
+        given: Path to the directory, as it was given.
 
     Returns:
-        The path, relative to the directory as it was given.
+        The path, relative to the directory as it was given, or the directory as it was
+        given when the path is the directory itself.
     """
-    return join(directory, relpath(path, templates_dir))
+    rel = relpath(path, base)
+
+    if rel == ".":
+        return given or "."
+
+    return join(given, rel)
 
 
 def _press(
-    template: str,
+    directory: str,
+    name: str | None,
     values_path: str,
     output: str,
-) -> None:
+) -> bool:
     """
-    Press values from a YAML file into a template.
+    Press values from a YAML file into a template, or into every template within the
+    source templates directory.
 
-    The template's directory is the source templates directory, and the values file is
-    protected from being pressed over.
+    The values file is protected from being pressed over.
 
     Args:
-        template: Path to the template to press.
+        directory: Path to the source templates directory.
+        name: Name of the template to press within the directory, or `None` to press
+            every template within it.
         values_path: Path to the YAML file of values to press.
-        output: Path to the file to press to.
+        output: Path to the file to press the template to, or the directory to press
+            every template into.
+
+    Returns:
+        `False` when there was nothing to press in the directory, otherwise `True`.
 
     Raises:
         Exception: When anything stops the press. Nothing has been written, unless
             writing itself failed.
     """
-    # Check the template as it was given, so that the error names it that way, so that
-    # a path like "doc.md/" is refused rather than tidied up, and so that a template
-    # like a FIFO is refused before anything reads it.
-    mode = stat(template).st_mode
-
-    if S_ISDIR(mode):
-        raise os_error(IsADirectoryError, template)
-
-    if not S_ISREG(mode):
-        raise _Error(f"Template {template!r} is not a regular file")
-
     with open(values_path, "rb") as stream:
         values = _load_values(stream, values_path)
 
-    # The template is a file, so its name is never empty.
-    directory, name = split(template)
     platen = Platen(directory or ".", values, protect=[values_path])
+
+    if name is None:
+        return platen.press(output) > 0
+
     platen.press_file(name, output)
+    return True
 
 
 def _spellings(path: str) -> dict[str, str]:
@@ -313,6 +426,49 @@ def _spellings(path: str) -> dict[str, str]:
         path = parent
 
 
+def _template_as_given(
+    path: Path,
+    template: str,
+    directory: str,
+    name: str | None,
+) -> str:
+    """
+    Name a template that's being pressed the way the user would know it.
+
+    Args:
+        path: Path to the template within the source templates directory.
+        template: Path to the template, or directory of templates, as it was given.
+        directory: Path to the source templates directory, as it was given.
+        name: Name of the template within the directory, or `None` when the whole
+            directory is being pressed.
+
+    Returns:
+        The template as it was given, when it was named, or else the template within
+        the directory as it was given.
+    """
+    if name is not None:
+        # Only the template that was named is pressed.
+        return template
+
+    return _in_templates_dir(str(path), directory)
+
+
+def _templates_dir(directory: str) -> Path:
+    """
+    Find the source templates directory.
+
+    Args:
+        directory: Path to the source templates directory, as it was given.
+
+    Returns:
+        The directory, resolved like Platen resolves it.
+
+    Raises:
+        OSError: When the directory is relative and the working directory is gone.
+    """
+    return Path(realpath(directory or "."))
+
+
 def _yaml_problem(error: YAMLError, path: str) -> str:
     """
     Describe a problem with a values file.
@@ -341,10 +497,11 @@ def _yaml_problem(error: YAMLError, path: str) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """
-    Press values from a YAML file into a template, on the command line.
+    Press values from a YAML file into a template, or into every template within a
+    directory, on the command line.
 
-    Nothing is printed on success. Any failure is printed as a single line, without a
-    traceback.
+    Nothing is printed on success, except a warning when a directory has nothing to
+    press. Any failure is printed as a single line, without a traceback.
 
     Args:
         argv: Command-line arguments, without the program's name. Defaults to the
@@ -357,32 +514,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         SystemExit: When the arguments are wrong, with 2, or help is asked for, with 0.
     """
     parser = ArgumentParser(
-        description="Press structured data into a document.",
+        description="Press structured data into documents.",
         prog="platen",
     )
 
     parser.add_argument(
         "template",
         help=(
-            "path to the template to press; templates that it includes are found "
-            "relative to its directory"
+            "path to the template to press, or to a directory of templates to press "
+            "them all; included templates are found relative to the template's "
+            "directory, or to that directory"
         ),
     )
 
     parser.add_argument(
         "values",
-        help="path to the YAML file of values to press into the template",
+        help="path to the YAML file of values to press into the templates",
     )
 
     parser.add_argument(
         "output",
-        help="path to the file to press to",
+        help=(
+            "path to the file to press to, or the directory to press into when the "
+            "template is a directory"
+        ),
     )
 
     arguments = parser.parse_args(argv)
 
+    # Paths are named relative to the template's directory, as it was given, until the
+    # template is found to be a directory of templates itself.
+    directory, name = split(arguments.template)
+
     try:
-        _press(arguments.template, arguments.values, arguments.output)
+        directory, name = _locate(arguments.template)
+        pressed = _press(directory, name, arguments.values, arguments.output)
     except KeyboardInterrupt:
         # Stop quietly, with the exit code that shells give an interrupted command.
         return 130
@@ -390,11 +556,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         message = _describe(
             error,
             arguments.template,
+            directory,
+            name,
             arguments.values,
             arguments.output,
         )
 
         print(f"{parser.prog}: error: {message}", file=sys.stderr)
         return 1
+
+    if not pressed:
+        # Name the directory as it was given, rather than as the library logs it.
+        print(
+            f"{parser.prog}: warning: Nothing to press in {arguments.template!r}: "
+            "it's empty, or everything in it is ignored",
+            file=sys.stderr,
+        )
 
     return 0
