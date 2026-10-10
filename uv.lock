@@ -285,7 +285,6 @@ wheels = [
 
 [[package]]
 name = "platen"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "jinja2" },
@@ -308,9 +307,9 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "jinja2", specifier = ">=3.1.6" },
-    { name = "mosey", specifier = ">=0.2.0" },
-    { name = "ruamel-yaml", specifier = ">=0.19.1" },
+    { name = "jinja2", specifier = ">=3.1.6,<4" },
+    { name = "mosey", specifier = ">=0.2.0,<0.3" },
+    { name = "ruamel-yaml", specifier = ">=0.19.1,<0.20" },
 ]
 
 [package.metadata.requires-dev]
