@@ -10,12 +10,13 @@ def test(
     templates_dir: Path,
 ) -> None:
     """
-    `platen` on the command line must neither press nor copy ignored files when it
-    presses a templates directory.
+    `platen` on the command line must not press ignored files when it presses a
+    templates directory.
 
     Files ignored by `.platenignore` files must not be written to the output directory,
-    and nor must the `.platenignore` files themselves. The ignored files here reference
-    an undefined value, so pressing any of them would fail.
+    and nor must the `.platenignore` files themselves, because no line in them
+    re-includes them. The ignored files here reference an undefined value, so pressing
+    any of them would fail.
     """
     values = Path(__file__).parent / "values.yaml"
     exit_code = main([str(templates_dir), str(values), str(output_dir)])

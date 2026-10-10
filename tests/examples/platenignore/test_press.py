@@ -10,12 +10,13 @@ def test(
     platen: Platen,
 ) -> None:
     """
-    `Platen.press` must neither press nor copy ignored files.
+    `Platen.press` must not press ignored files.
 
     Files ignored by `.platenignore` files must not be written to the
     output directory, and nor must the `.platenignore` files
-    themselves. The ignored files here reference an undefined value,
-    so pressing any of them would fail.
+    themselves, because no line in them re-includes them. The ignored
+    files here reference an undefined value, so pressing any of them
+    would fail.
     """
     platen.press(output_dir)
     assert_output_matches_expect()

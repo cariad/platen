@@ -258,11 +258,11 @@ wheels = [
 
 [[package]]
 name = "mosey"
-version = "0.2.0"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/dd/15/64d1f47b9f2d3cd534543b290dd0bf41f0dff1e0d0a7976210067db31829/mosey-0.2.0.tar.gz", hash = "sha256:24f7b487d6235fcae485a963c1124f8f6f89d37e994ff9f70ebed60b7a5c4773", size = 120796, upload-time = "2026-10-05T11:50:46.04Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/db/e8/4bf9c10af770cf16fe54611adef3924d5707c78232741324c6978afe058d/mosey-0.4.0.tar.gz", hash = "sha256:6e2017657bd41688936170bb13911aaa937ebffb0580d79f3afd2203f4c163b6", size = 152484, upload-time = "2026-10-10T12:59:14.409Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/eb/3b/6ff975f31e7d05a15bb5279a2111832cacae4258ee41062a507c4cf011c9/mosey-0.2.0-py3-none-any.whl", hash = "sha256:760c6d62affdd9156f463988a21c78d4b68635c724e1c66ff2f43f5074249a81", size = 23895, upload-time = "2026-10-05T11:50:44.892Z" },
+    { url = "https://files.pythonhosted.org/packages/46/72/4953bbc3921903cb41b1b58e2022c46bf8e76f407a0f9dbc83a822873471/mosey-0.4.0-py3-none-any.whl", hash = "sha256:87a14d3f540cc51fcb256d0899fa9a064a9687fc905f26b263aaf0be952863b7", size = 33107, upload-time = "2026-10-10T12:59:12.946Z" },
 ]
 
 [[package]]
@@ -308,7 +308,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "jinja2", specifier = ">=3.1.6,<4" },
-    { name = "mosey", specifier = ">=0.2.0,<0.3" },
+    { name = "mosey", specifier = ">=0.4.0,<0.5" },
     { name = "ruamel-yaml", specifier = ">=0.19.1,<0.20" },
 ]
 
