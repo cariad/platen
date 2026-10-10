@@ -998,6 +998,57 @@ def test_press_presses_symlink_to_file_with_target_content(
 @mark.parametrize(
     ("method", "template", "destination", "expect"),
     [
+        ("press_directory", "SOURCE", ".", ["file.md", "sub/file.md"]),
+        ("press_directory", "SOURCE/SUB", ".", ["file.md"]),
+        ("press_file", "SOURCE/SUB/file.md", "file.md", ["file.md"]),
+    ],
+    ids=[
+        "directory",
+        "subdirectory",
+        "file",
+    ],
+)
+def test_press_presses_templates_named_absolutely_in_different_case(
+    method: str,
+    template: str,
+    destination: str,
+    expect: list[str],
+    output_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """
+    `press_file` and `press_directory` must press templates named by absolute paths in a
+    different case from how they're stored, on a file system that's insensitive to case,
+    like macOS's default APFS.
+    """
+    templates_dir = tmp_path / "source"
+    (templates_dir / "sub").mkdir(parents=True)
+    (templates_dir / "file.md").write_text("Hello, world!\n", encoding="utf-8")
+    (templates_dir / "sub" / "file.md").write_text("Hello, world!\n", encoding="utf-8")
+
+    if not exists(tmp_path / "SOURCE"):
+        skip("'SOURCE' names a different directory on this file system")
+
+    platen = Platen(
+        templates_dir,
+        {},
+    )
+
+    press = platen.press_file if method == "press_file" else platen.press_directory
+    press(tmp_path / template, output_dir / destination)
+
+    pressed = sorted(
+        p.relative_to(output_dir).as_posix()
+        for p in output_dir.rglob("*")
+        if p.is_file()
+    )
+
+    assert pressed == expect
+
+
+@mark.parametrize(
+    ("method", "template", "destination", "expect"),
+    [
         ("press_directory", "alias", ".", ["file.md", "sub/file.md"]),
         ("press_directory", "alias/sub", "sub", ["sub/file.md"]),
         ("press_file", "alias/sub/file.md", "sub/file.md", ["sub/file.md"]),

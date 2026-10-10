@@ -132,6 +132,10 @@ class Platen:
     Templates are pressed one at a time, and a press stops at the first error. The
     templates pressed before it stay pressed.
 
+    A relative destination is found from the working directory as each template is
+    written, so don't change the working directory during a press, like from a callable
+    in `values`.
+
     Args:
         templates_dir: Path to the source templates directory.
         values: Values to press into the templates.
@@ -197,10 +201,19 @@ class Platen:
         # version: with `OSError` when it's identified.
         path = Path(realpath(self._templates_dir / named))
 
-        if not path.is_relative_to(self._templates_dir):
-            raise TemplateNotInDirectoryError(path, self._templates_dir)
+        if path.is_relative_to(self._templates_dir):
+            return path.relative_to(self._templates_dir).as_posix()
 
-        return path.relative_to(self._templates_dir).as_posix()
+        # `realpath` keeps the caller's spelling, which a case- or normalisation-
+        # insensitive file system can store differently, so find the templates directory
+        # by identity before refusing the path. Nothing can be within a templates
+        # directory that doesn't exist.
+        if (found := identity(self._templates_dir)) is not None:
+            for parent in (path, *path.parents):
+                if identity(parent) == found:
+                    return path.relative_to(parent).as_posix()
+
+        raise TemplateNotInDirectoryError(path, self._templates_dir)
 
     def _press(
         self,

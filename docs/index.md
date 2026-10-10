@@ -217,7 +217,7 @@ platen.press_directory("posts", "build/posts")  # Every template in a subdirecto
 platen.press_file("tasks.md", "build/todo.md")  # One template
 ```
 
-Templates and directories of templates are named relative to the templates directory, or absolutely, because that's how Jinja names templates. Destinations are relative to your working directory, or absolute, like any other path you'd open.
+Templates and directories of templates are named relative to the templates directory, or absolutely, because that's how Jinja names templates. Destinations are relative to your working directory, or absolute, like any other path you'd open. Platen finds a relative destination from your working directory as it writes each file, so don't change your working directory during a press, like from a function in your values.
 
 Names are followed through symlinks, so you can name a template or a directory through a symlink, and Platen presses the file or directory that it leads to. Wherever a name leads, it must be within the templates directory, or Platen raises `TemplateNotInDirectoryError`.
 
