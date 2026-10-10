@@ -7,9 +7,9 @@ class DestinationWithinDirectoryError(PlatenError, ValueError):
     """
     Raised before pressing a directory to a destination within it.
 
-    A press must never write within the directory that it presses. The next press of
-    the same directory would read the output as templates, and this press could
-    overwrite files that it ignores.
+    The destination is checked once, before anything is pressed. Pressing into the
+    directory that's pressed would make the next press read the output as templates,
+    and could overwrite files that the press ignores.
     """
 
     def __init__(

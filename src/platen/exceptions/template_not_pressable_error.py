@@ -5,11 +5,10 @@ from .platen_error import PlatenError
 
 class TemplateNotPressableError(PlatenError, ValueError):
     """
-    Raised before pressing a template that can't be read as a template, or copied.
+    Raised when a template can't be read as a template.
 
-    Only regular files are pressed, because reading a FIFO would block, and reading a
-    device might never end. Text templates must be UTF-8, because Jinja reads them as
-    UTF-8.
+    Only regular files are templates, so a directory, a FIFO or a device can't be one.
+    Templates must be UTF-8, because Jinja reads them as UTF-8.
     """
 
     def __init__(

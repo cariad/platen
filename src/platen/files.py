@@ -1,60 +1,40 @@
-from errno import EEXIST, EISDIR, ENOENT, ENOTDIR
-from os import PathLike, fspath, stat, strerror
+from os import PathLike, fspath, stat
 from os.path import realpath
 from pathlib import Path
-from re import search
-from typing import TypeVar
-
-from .types import LineEnding, Sniff
-
-SNIFF_LENGTH = 8_000
-"""
-Number of bytes to sniff to learn about a file.
-
-This must remain at least 8,000. Like Git, we'll assume a file is binary
-if it contains a NUL (b"\0") character in the first 8,000 bytes.
-"""
-
-_E = TypeVar("_E", bound=OSError)
-
-_ERRNOS: dict[type[OSError], int] = {
-    FileExistsError: EEXIST,
-    FileNotFoundError: ENOENT,
-    IsADirectoryError: EISDIR,
-    NotADirectoryError: ENOTDIR,
-}
-"""The error number of each kind of `OSError` that Platen raises itself."""
-
-_LINE_ENDING_PATTERN = b"|".join(
-    e.encode() for e in sorted(LineEnding, key=len, reverse=True)
-)
-"""
-Matches any line ending.
-
-Longer sequences are tried first so that a CRLF is not matched as a CR.
-"""
 
 
-def _identity(path: Path) -> tuple[int, int] | None:
+def _identity(
+    resolved: PathLike[str] | str,
+    given: PathLike[str] | str,
+) -> tuple[int, int] | None:
     """
     Identify the file at a path that's already been resolved with `realpath`.
 
     Args:
-        path: Resolved path to the file to identify.
+        resolved: Resolved path to the file to identify.
+        given: Path to name in an error, as it was given.
 
     Returns:
-        The file's device and inode numbers, or `None` when nothing exists at `path`.
+        The file's device and inode numbers, or `None` when nothing exists at
+        `resolved`.
 
     Raises:
         OSError: When the file can't be identified for any other reason, like
-            permissions or a loop of symlinks.
+            permissions or a loop of symlinks. The error names `given`.
     """
     try:
-        st = stat(path)
+        st = stat(resolved)
     except (FileNotFoundError, NotADirectoryError):
         # `NotADirectoryError` means that one of the path's parents is a file, so
         # nothing can exist at the path.
         return None
+    except OSError as error:
+        # Name the path as it was given, rather than where it leads.
+        raise OSError(
+            error.errno,
+            error.strerror,
+            fspath(given),
+        ) from error
 
     return st.st_dev, st.st_ino
 
@@ -84,37 +64,14 @@ def identity(path: Path) -> tuple[int, int] | None:
     Raises:
         OSError: When the file can't be identified for any other reason, like
             permissions or a loop of symlinks. A safety check that can't be made must
-            fail rather than pass.
+            fail rather than pass. The error names `path` as it was given.
     """
-    return _identity(Path(realpath(path)))
-
-
-def is_resolved_within(resolved: Path, directory: tuple[int, int] | None) -> bool:
-    """
-    Check whether a resolved path is a directory or within it.
-
-    `resolved` must already be resolved with `realpath`, so that it and each of its
-    parents can be identified directly, without resolving each of them again.
-
-    Args:
-        resolved: Resolved path to check.
-        directory: The directory's identity, from `identity`, or `None` when the
-            directory doesn't exist.
-
-    Returns:
-        `True` if `resolved` is the directory or within it, otherwise `False`. Always
-        `False` when the directory doesn't exist.
-
-    Raises:
-        OSError: When a file along the path can't be identified, like when permissions
-            deny it or symlinks loop.
-    """
-    if directory is None:
-        # Nothing can be within a directory that doesn't exist, and the paths that
-        # don't exist have no identity either, so they mustn't be compared with it.
-        return False
-
-    return any(_identity(p) == directory for p in (resolved, *resolved.parents))
+    # `realpath` raises, rather than passing as a file that doesn't exist, for a
+    # relative path in a working directory that's gone.
+    return _identity(
+        realpath(path),
+        path,
+    )
 
 
 def is_within(path: Path, directory: Path) -> bool:
@@ -137,79 +94,18 @@ def is_within(path: Path, directory: Path) -> bool:
 
     Raises:
         OSError: When a file along the resolved path can't be identified, like when
-            permissions deny it or symlinks loop.
+            permissions deny it or symlinks loop. The error names `path` as it was
+            given.
     """
+    if (found := identity(directory)) is None:
+        # Nothing can be within a directory that doesn't exist, and the paths that
+        # don't exist have no identity either, so they mustn't be compared with it.
+        return False
+
     # `Path.resolve()` raises `RuntimeError` for a loop of symlinks on Python 3.11 and
     # 3.12, but `realpath` never raises, so a loop fails the same way on every version:
     # with `OSError` when the looping path is identified.
-    return is_resolved_within(Path(realpath(path)), identity(directory))
-
-
-def os_error(
-    error: type[_E],
-    path: PathLike[str] | str,
-    other: PathLike[str] | str | None = None,
-    reason: str | None = None,
-) -> _E:
-    """
-    Make an `OSError` like the one the operating system would raise.
-
-    The error number and message come from the type of error, so they always agree.
-
-    Args:
-        error: Type of error to make.
-        path: Path that the error is about.
-        other: Another path that the error is about, if there is one.
-        reason: Why the error was raised, to add to the message, if it needs saying.
-
-    Returns:
-        The error.
-    """
-    code = _ERRNOS[error]
-    message = strerror(code) if reason is None else f"{strerror(code)} ({reason})"
-    filename2 = None if other is None else fspath(other)
-    return error(code, message, fspath(path), None, filename2)
-
-
-def sniff(path: Path) -> Sniff:
-    """
-    Sniff the file at `path` to discover whether it is text and, if so,
-    which line ending it uses.
-
-    Args:
-        path: Path to the file to sniff.
-
-    Returns:
-        Facts about the file.
-    """
-    with path.open("rb") as f:
-        head = f.read(SNIFF_LENGTH)
-
-        if b"\0" in head:
-            # Like Git, we assume a file is binary if it contains a NUL
-            # (b"\0") character in the first 8,000 bytes.
-            return Sniff(is_text=False)
-
-        match = search(_LINE_ENDING_PATTERN, head)
-
-        if match is None:
-            return Sniff(
-                is_text=True,
-                line_ending=None,
-            )
-
-        line_ending = LineEnding(match.group().decode())
-
-        # A CRLF might straddle the end of the head, so peek at the next
-        # byte before concluding that this is a lone CR.
-        if (
-            line_ending is LineEnding.CR
-            and match.end() == len(head)
-            and f.read(1) == LineEnding.LF.encode()
-        ):
-            line_ending = LineEnding.CRLF
-
-    return Sniff(
-        is_text=True,
-        line_ending=line_ending,
-    )
+    # The path and its parents are already resolved, so identify them without resolving
+    # each of them again.
+    resolved = Path(realpath(path))
+    return any(_identity(p, path) == found for p in (resolved, *resolved.parents))

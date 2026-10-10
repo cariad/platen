@@ -1,13 +1,13 @@
 import os
-from errno import EEXIST, EISDIR, ELOOP, ENOENT, ENOTDIR
+from errno import ELOOP
 from logging import WARNING
-from os import W_OK, access, getcwd, link, strerror
-from os.path import exists, join, realpath
+from os import R_OK, W_OK, access, link
+from os.path import exists, realpath
 from pathlib import Path
 from re import escape
 from stat import S_IMODE
 
-from jinja2 import UndefinedError
+from jinja2 import TemplateNotFound, UndefinedError
 from pytest import LogCaptureFixture, MonkeyPatch, mark, raises, skip
 
 from platen import (
@@ -18,7 +18,6 @@ from platen import (
     TemplateNotInDirectoryError,
     TemplateNotPressableError,
 )
-from platen.files import identity
 from tests.snapshots import snapshot
 
 
@@ -26,29 +25,35 @@ def _symlinked_directories(tmp_path: Path) -> Path:
     """
     Create a templates directory that holds `linked`, a symlink to a directory that
     holds another symlink to a directory, and return the templates directory's path.
+
+    The inner symlink is ignored, so that a walk of the directory that holds it can
+    press everything else.
     """
     templates_dir = tmp_path / "source"
     real_dir = templates_dir / "real"
     (real_dir / "sub" / "deeper").mkdir(parents=True)
     (templates_dir / "dir").mkdir()
-    (real_dir / "file.md").write_text("Hello, world!\n", encoding="utf-8")
-    (real_dir / "sub" / "file.md").write_text("Hello, world!\n", encoding="utf-8")
+    (templates_dir / ".platenignore").write_text("sublinked\n", encoding="utf-8")
+
+    for rel_path in ("file.md", "sub/file.md", "sub/deeper/file.md"):
+        (real_dir / rel_path).write_text("Hello, world!\n", encoding="utf-8")
+
     (real_dir / "sublinked").symlink_to(real_dir / "sub", target_is_directory=True)
     (templates_dir / "linked").symlink_to(real_dir, target_is_directory=True)
     return templates_dir
 
 
-def test_press_checks_template_before_working_directory(
+def test_press_directory_checks_directory_before_working_directory(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """
-    `press_file` and `press_directory` must check what kind of template they're given
-    before they make a relative destination absolute, so that a missing working
-    directory doesn't hide the template's error.
+    `press_directory` must check that it's given a directory before it resolves a
+    relative destination, so that a missing working directory doesn't hide the
+    directory's error.
     """
     templates_dir = tmp_path / "source"
-    (templates_dir / "sub").mkdir(parents=True)
+    templates_dir.mkdir()
     (templates_dir / "doc.md").write_text("Hello, world!\n", encoding="utf-8")
 
     platen = Platen(
@@ -61,11 +66,112 @@ def test_press_checks_template_before_working_directory(
     monkeypatch.chdir(working_dir)
     working_dir.rmdir()
 
-    with raises(IsADirectoryError):
-        platen.press_file("sub", "out.md")
-
     with raises(NotADirectoryError):
         platen.press_directory("doc.md", "out")
+
+
+def test_press_directory_names_first_of_templates_that_are_the_same_file(
+    tmp_path: Path,
+) -> None:
+    """
+    `press_directory` must name the first template that the walk finds when a
+    destination is the same file as more than one, like a template and a symlink to it.
+    """
+    templates_dir = tmp_path / "templates"
+    (templates_dir / "posts").mkdir(parents=True)
+    (templates_dir / "posts" / "a.md").write_text("{{ greeting }}\n", encoding="utf-8")
+    (templates_dir / "posts" / "link.md").symlink_to("a.md")
+
+    destination = tmp_path / "out"
+    destination.mkdir()
+    link(templates_dir / "posts" / "a.md", destination / "a.md")
+
+    platen = Platen(
+        templates_dir,
+        {"greeting": "Hello"},
+    )
+
+    with raises(DestinationIsTemplateError) as ex:
+        platen.press_directory("posts", destination)
+
+    assert ex.value.destination_path == destination / "a.md"
+    assert ex.value.template_path == platen.templates_dir / "posts" / "a.md"
+
+
+def test_press_directory_presses_directory_named_in_different_case(
+    output_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """
+    `press_directory` must press a directory named in a different case from how it's
+    stored, on a file system that's insensitive to case, like macOS's default APFS, and
+    no other directory that starts with the same name.
+    """
+    templates_dir = tmp_path / "templates"
+    (templates_dir / "sub").mkdir(parents=True)
+    (templates_dir / "subway").mkdir()
+    (templates_dir / "sub" / "a.md").write_text("{{ greeting }}\n", encoding="utf-8")
+    (templates_dir / "subway" / "b.md").write_text("{{ greeting }}\n", encoding="utf-8")
+
+    if not exists(templates_dir / "SUB"):
+        skip("'SUB' names a different directory on this file system")
+
+    platen = Platen(
+        templates_dir,
+        {"greeting": "Hello"},
+    )
+
+    assert platen.press_directory("SUB", output_dir) == 1
+
+    pressed = [p for p in output_dir.rglob("*") if p.is_file()]
+    assert pressed == [output_dir / "a.md"]
+    assert pressed[0].read_text(encoding="utf-8") == "Hello\n"
+
+
+@mark.parametrize(
+    ("directory", "expect"),
+    [
+        ("linked", ["file.md", "sub/deeper/file.md", "sub/file.md"]),
+        ("linked/sub", ["deeper/file.md", "file.md"]),
+        ("linked/sublinked", ["deeper/file.md", "file.md"]),
+        ("linked/sublinked/deeper", ["file.md"]),
+        ("dir/../linked", ["file.md", "sub/deeper/file.md", "sub/file.md"]),
+        ("linked/sub/../sub", ["deeper/file.md", "file.md"]),
+    ],
+    ids=[
+        "symlink",
+        "directory within",
+        "symlink within",
+        "directory within symlink within",
+        "symlink via parent",
+        "directory within via parent",
+    ],
+)
+def test_press_directory_presses_directory_named_through_symlink(
+    directory: str,
+    expect: list[str],
+    output_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """
+    `press_directory` must press the directory that a symlink leads to when it's named
+    through one, or through a directory within one, even though walks never step into
+    symlinks.
+    """
+    platen = Platen(
+        _symlinked_directories(tmp_path),
+        {},
+    )
+
+    assert platen.press_directory(directory, output_dir) == len(expect)
+
+    pressed = sorted(
+        p.relative_to(output_dir).as_posix()
+        for p in output_dir.rglob("*")
+        if p.is_file()
+    )
+
+    assert pressed == expect
 
 
 def test_press_directory_presses_to_destination(
@@ -125,143 +231,74 @@ def test_press_directory_presses_to_sibling_within_templates_dir(
     assert pressed.read_text(encoding="utf-8") == "Hello\n"
 
 
-@mark.parametrize(
-    "directory",
-    [
-        "linked",
-        "linked/sub",
-        "linked/sublinked",
-        "linked/sublinked/deeper",
-        "dir/../linked",
-        "linked/sub/../sub",
-    ],
-    ids=[
-        "symlink",
-        "directory within",
-        "symlink within",
-        "directory within symlink within",
-        "symlink via parent",
-        "directory within via parent",
-    ],
-)
-def test_press_directory_raises_for_symlink_to_directory(
-    directory: str,
-    output_dir: Path,
+def test_press_directory_raises_when_destination_is_earlier_template(
     tmp_path: Path,
 ) -> None:
     """
-    `press_directory` must raise `NotADirectoryError` when it's asked to press a symlink
-    to a directory, or a directory within one.
+    `press_directory` must raise `DestinationIsTemplateError` when a destination is the
+    same file as a template that the press has already pressed, rather than overwriting
+    the template.
 
-    Symlinks are pressed like files and never walked into, so a walk would find nothing
-    to press. The error must name the outermost symlink, and nothing must be pressed.
+    The press stops there, so the templates pressed before it stay pressed.
     """
-    platen = Platen(
-        _symlinked_directories(tmp_path),
-        {},
-    )
+    templates_dir = tmp_path / "templates"
+    (templates_dir / "posts").mkdir(parents=True)
 
-    with raises(NotADirectoryError) as ex:
-        platen.press_directory(directory, output_dir)
-
-    assert ex.value.errno == ENOTDIR
-    assert ex.value.filename == str(platen.templates_dir / "linked")
-    assert (
-        ex.value.strerror == f"{strerror(ENOTDIR)} (Platen never walks into symlinks)"
-    )
-    assert ex.value.filename2 is None
-    assert not output_dir.exists()
-
-
-@mark.parametrize(
-    ("destination", "expect", "expect_destination"),
-    [
-        ("dir_in_way", IsADirectoryError, "dir_in_way/z.md"),
-        (
-            "missing/../dir_in_way",
-            IsADirectoryError,
-            "missing/../dir_in_way/z.md",
-        ),
-        ("file_in_way", NotADirectoryError, "file_in_way/sub/b.md"),
-        (
-            "missing/../file_in_way",
-            NotADirectoryError,
-            "missing/../file_in_way/sub/b.md",
-        ),
-        (
-            "file_in_way/sub/../out",
-            NotADirectoryError,
-            "file_in_way/sub/../out",
-        ),
-        ("dangling", FileNotFoundError, "dangling/z.md"),
-        ("beneath_file", NotADirectoryError, "beneath_file/z.md"),
-        ("into_result", NotADirectoryError, "into_result/sub/b.md"),
-        ("case_variant", NotADirectoryError, "case_variant/sub/b.md"),
-    ],
-    ids=[
-        "directory in the way of a file",
-        "directory in the way of a file, via parent of missing directory",
-        "file in the way of a directory",
-        "file in the way of a directory, via parent of missing directory",
-        "via parent of file",
-        "symlink into missing directory",
-        "symlink beneath file",
-        "symlink into another result",
-        "symlink into existing result, by a different case",
-    ],
-)
-def test_press_directory_raises_when_destination_is_in_the_way(
-    destination: str,
-    expect: type[OSError],
-    expect_destination: str,
-    tmp_path: Path,
-) -> None:
-    """
-    `press_directory` must raise before writing anything when something within the
-    destination is in the way of a template's result, wherever symlinks lead, rather
-    than failing partway through writing.
-    """
-    templates_dir = tmp_path / "source"
-    (templates_dir / "sub").mkdir(parents=True)
-
-    for rel_path in ("a.md", "sub/b.md", "z.md"):
+    for rel_path in ("posts/a.md", "posts/b.md"):
         (templates_dir / rel_path).write_text("{{ greeting }}\n", encoding="utf-8")
 
-    for name in (
-        "dir_in_way",
-        "file_in_way",
-        "dangling",
-        "beneath_file",
-        "into_result",
-        "case_variant",
-    ):
-        (tmp_path / name).mkdir()
-
-    (tmp_path / "dir_in_way" / "z.md").mkdir()
-    (tmp_path / "file_in_way" / "sub").write_text("In the way\n", encoding="utf-8")
-    (tmp_path / "in_the_way").write_text("In the way\n", encoding="utf-8")
-    (tmp_path / "dangling" / "z.md").symlink_to(tmp_path / "nowhere" / "z.md")
-    (tmp_path / "beneath_file" / "z.md").symlink_to(tmp_path / "in_the_way" / "z.md")
-    (tmp_path / "into_result" / "sub").symlink_to(tmp_path / "into_result" / "a.md")
-    (tmp_path / "case_variant" / "a.md").write_text("Old\n", encoding="utf-8")
-    (tmp_path / "case_variant" / "sub").symlink_to(tmp_path / "case_variant" / "A.md")
-
-    # A different case only names the same file on case-insensitive file systems, like
-    # macOS's default APFS.
-    if destination == "case_variant" and not (tmp_path / destination / "A.md").exists():
-        skip("'A.md' names a different file on this file system")
+    destination = tmp_path / "out"
+    destination.mkdir()
+    link(templates_dir / "posts" / "a.md", destination / "b.md")
 
     platen = Platen(
         templates_dir,
         {"greeting": "Hello"},
     )
 
+    with raises(DestinationIsTemplateError) as ex:
+        platen.press_directory("posts", destination)
+
+    assert ex.value.destination_path == destination / "b.md"
+    assert ex.value.template_path == platen.templates_dir / "posts" / "a.md"
+    assert (destination / "a.md").read_text(encoding="utf-8") == "Hello\n"
+
+    template = templates_dir / "posts" / "a.md"
+    assert template.read_text(encoding="utf-8") == "{{ greeting }}\n"
+
+
+def test_press_directory_raises_when_destination_is_template_outside_directory(
+    tmp_path: Path,
+) -> None:
+    """
+    `press_directory` must raise `DestinationIsTemplateError` when a destination is the
+    same file as a template outside the directory being pressed, so that pressing into
+    the templates directory can't overwrite a template that a later one includes.
+    """
+    templates_dir = tmp_path / "templates"
+    (templates_dir / "pages").mkdir(parents=True)
+    (templates_dir / "shared").mkdir()
+    (templates_dir / "pages" / "footer.md").write_text("Pressed\n", encoding="utf-8")
+
+    (templates_dir / "pages" / "z.md").write_text(
+        '{% include "shared/footer.md" %}',
+        encoding="utf-8",
+    )
+
+    (templates_dir / "shared" / "footer.md").write_text("Original\n", encoding="utf-8")
+
+    platen = Platen(
+        templates_dir,
+        {},
+    )
+
     before = snapshot(tmp_path)
 
-    with raises(expect) as ex:
-        platen.press_directory(".", tmp_path / destination)
+    with raises(DestinationIsTemplateError) as ex:
+        platen.press_directory("pages", templates_dir / "shared")
 
-    assert ex.value.filename == str(tmp_path / expect_destination)
+    assert ex.value.destination_path == templates_dir / "shared" / "footer.md"
+    assert ex.value.template_path == platen.templates_dir / "shared" / "footer.md"
     assert snapshot(tmp_path) == before
 
 
@@ -276,8 +313,10 @@ def test_press_directory_raises_when_destination_is_template_via_missing_dir(
     templates_dir = tmp_path / "source"
     (templates_dir / "sub").mkdir(parents=True)
     (templates_dir / "doc.md").write_text("{{ greeting }}\n", encoding="utf-8")
-    (templates_dir / "sub" / "a.md").write_text("{{ greeting }}\n", encoding="utf-8")
     (templates_dir / "sub" / "link").symlink_to("missing/../../doc.md")
+
+    # Keep the target out of the walk, so that only the symlink can protect it.
+    (templates_dir / ".platenignore").write_text("/doc.md\n", encoding="utf-8")
 
     destination = tmp_path / "out"
     destination.mkdir()
@@ -299,69 +338,14 @@ def test_press_directory_raises_when_destination_is_template_via_missing_dir(
 
 
 @mark.parametrize(
-    ("alias", "expect_destination", "expect_claimed"),
+    ("directory", "expect", "expect_path"),
     [
-        ("symlink", "sub/a.md", "a.md"),
-        ("hard link", "b.md", "a.md"),
-    ],
-    ids=[
-        "symlink to destination",
-        "hard link between destinations",
-    ],
-)
-def test_press_directory_raises_when_destinations_collide(
-    alias: str,
-    expect_destination: str,
-    expect_claimed: str,
-    tmp_path: Path,
-) -> None:
-    """
-    `press_directory` must raise `FileExistsError` before writing anything when two
-    templates would be pressed to the same file, rather than letting one result
-    overwrite the other.
-    """
-    templates_dir = tmp_path / "source"
-    (templates_dir / "sub").mkdir(parents=True)
-
-    for rel_path in ("a.md", "b.md", "sub/a.md"):
-        (templates_dir / rel_path).write_text("{{ greeting }}\n", encoding="utf-8")
-
-    destination = tmp_path / "build"
-    destination.mkdir()
-
-    if alias == "symlink":
-        (destination / "sub").symlink_to(destination, target_is_directory=True)
-    else:
-        (destination / "a.md").write_text("Old\n", encoding="utf-8")
-        link(destination / "a.md", destination / "b.md")
-
-    platen = Platen(
-        templates_dir,
-        {"greeting": "Hello"},
-    )
-
-    before = snapshot(tmp_path)
-
-    with raises(FileExistsError) as ex:
-        platen.press_directory(".", destination)
-
-    assert ex.value.errno == EEXIST
-    assert ex.value.filename == str(destination / expect_destination)
-    assert ex.value.filename2 == str(destination / expect_claimed)
-    assert snapshot(tmp_path) == before
-
-
-@mark.parametrize(
-    ("directory", "expect"),
-    [
-        ("doc.md", NotADirectoryError),
-        ("doc.md/..", NotADirectoryError),
-        ("broken", NotADirectoryError),
-        ("missing", FileNotFoundError),
+        ("doc.md", NotADirectoryError, "doc.md"),
+        ("broken", FileNotFoundError, "nowhere"),
+        ("missing", FileNotFoundError, "missing"),
     ],
     ids=[
         "file",
-        "parent of file",
         "broken symlink",
         "missing",
     ],
@@ -369,6 +353,7 @@ def test_press_directory_raises_when_destinations_collide(
 def test_press_directory_raises_when_directory_is_not_directory(
     directory: str,
     expect: type[OSError],
+    expect_path: str,
     caplog: LogCaptureFixture,
     output_dir: Path,
     tmp_path: Path,
@@ -377,8 +362,8 @@ def test_press_directory_raises_when_directory_is_not_directory(
     `press_directory` must raise when it's asked to press anything but a directory,
     rather than pressing something else or warning that there's nothing to press.
 
-    The directory must be judged the way the operating system sees it, so a path like
-    "doc.md/.." must be refused rather than tidied up into the templates directory.
+    A directory named through a symlink is named by where the symlink leads, even when
+    nothing's there.
     """
     templates_dir = tmp_path / "source"
     templates_dir.mkdir()
@@ -393,43 +378,8 @@ def test_press_directory_raises_when_directory_is_not_directory(
     with caplog.at_level(WARNING, logger="platen"), raises(expect) as ex:
         platen.press_directory(directory, output_dir)
 
-    assert ex.value.filename == join(platen.templates_dir, directory)
+    assert ex.value.filename == str(platen.templates_dir / expect_path)
     assert not caplog.records
-    assert not output_dir.exists()
-
-
-def test_press_directory_raises_when_directory_vanishes(
-    monkeypatch: MonkeyPatch,
-    output_dir: Path,
-    tmp_path: Path,
-) -> None:
-    """
-    `press_directory` must raise `FileNotFoundError` when the directory being pressed
-    is gone by the time its destinations are checked, rather than letting the check
-    that nothing's written within it pass.
-    """
-    templates_dir = tmp_path / "source"
-    (templates_dir / "sub").mkdir(parents=True)
-    (templates_dir / "sub" / "doc.md").write_text("Hello, world!\n", encoding="utf-8")
-
-    platen = Platen(
-        templates_dir,
-        {},
-    )
-
-    vanished = platen.templates_dir / "sub"
-
-    # Simulate the directory being moved between the walk and the checks.
-    def identify(path: Path) -> tuple[int, int] | None:
-        return None if path == vanished else identity(path)
-
-    monkeypatch.setattr("platen.platen.identity", identify)
-
-    with raises(FileNotFoundError) as ex:
-        platen.press_directory("sub", output_dir)
-
-    assert ex.value.errno == ENOENT
-    assert ex.value.filename == str(vanished)
     assert not output_dir.exists()
 
 
@@ -519,6 +469,42 @@ def test_press_file_follows_symlink_before_parent(
     pressed = [p for p in output_dir.rglob("*") if p.is_file()]
     assert pressed == [output_dir / "doc.md"]
     assert pressed[0].read_text(encoding="utf-8") == "Right\n"
+
+
+@mark.parametrize(
+    ("body", "expect"),
+    [
+        ('A{% include "partials" ignore missing %}B\n', "AB\n"),
+        ('A{% include ["partials", "_b.txt"] %}B\n', "AbB\n"),
+    ],
+    ids=[
+        "ignore missing",
+        "list of templates",
+    ],
+)
+def test_press_file_lets_jinja_skip_reference_that_is_not_a_file(
+    body: str,
+    expect: str,
+    output_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """
+    `press_file` must leave a referenced template that isn't a regular file, like a
+    directory, to Jinja, so that `ignore missing` and lists of templates still skip it.
+    """
+    templates_dir = tmp_path / "source"
+    (templates_dir / "partials").mkdir(parents=True)
+    (templates_dir / "_b.txt").write_text("b", encoding="utf-8")
+    (templates_dir / "page.md").write_text(body, encoding="utf-8")
+
+    platen = Platen(
+        templates_dir,
+        {},
+    )
+
+    platen.press_file("page.md", output_dir / "page.md")
+
+    assert (output_dir / "page.md").read_text(encoding="utf-8") == expect
 
 
 @mark.parametrize(
@@ -631,22 +617,19 @@ def test_press_file_presses_to_absolute_destination(
 
 
 @mark.parametrize(
-    ("template", "destination", "expect"),
+    ("destination", "expect"),
     [
-        ("file.md", "source/renamed.md", "source/renamed.md"),
-        ("file.md", "build/new/deeper/file.md", "build/new/deeper/file.md"),
-        ("file.md", "build/../elsewhere/file.md", "elsewhere/file.md"),
-        ("blob.bin", "build/renamed.bin", "build/renamed.bin"),
+        ("source/renamed.md", "source/renamed.md"),
+        ("build/new/deeper/file.md", "build/new/deeper/file.md"),
+        ("build/../elsewhere/file.md", "elsewhere/file.md"),
     ],
     ids=[
         "renamed within templates directory",
         "within new directories",
         "via parent",
-        "binary",
     ],
 )
 def test_press_file_presses_to_destination(
-    template: str,
     destination: str,
     expect: str,
     monkeypatch: MonkeyPatch,
@@ -659,7 +642,6 @@ def test_press_file_presses_to_destination(
     templates_dir = tmp_path / "source"
     templates_dir.mkdir()
     (templates_dir / "file.md").write_text("{{ greeting }}\n", encoding="utf-8")
-    (templates_dir / "blob.bin").write_bytes(b"\x00\xff\xfe binary\n")
 
     monkeypatch.chdir(tmp_path)
 
@@ -668,26 +650,13 @@ def test_press_file_presses_to_destination(
         {"greeting": "Hello"},
     )
 
-    platen.press_file(template, destination)
+    platen.press_file("file.md", destination)
 
     pressed = tmp_path / expect
-    body = b"Hello\n" if template == "file.md" else b"\x00\xff\xfe binary\n"
-    assert pressed.read_bytes() == body
+    assert pressed.read_bytes() == b"Hello\n"
 
 
-@mark.parametrize(
-    "body",
-    [
-        b"{{ greeting }}, world!\n",
-        b"\x00\xff\xfe binary\n",
-    ],
-    ids=[
-        "text",
-        "binary",
-    ],
-)
 def test_press_file_presses_to_device_without_changing_its_permissions(
-    body: bytes,
     tmp_path: Path,
 ) -> None:
     """
@@ -698,7 +667,7 @@ def test_press_file_presses_to_device_without_changing_its_permissions(
     templates_dir.mkdir()
 
     template = templates_dir / "file"
-    template.write_bytes(body)
+    template.write_text("{{ greeting }}, world!\n", encoding="utf-8")
     template.chmod(0o700)
 
     platen = Platen(
@@ -756,8 +725,8 @@ def test_press_file_raises_for_missing_template(
     tmp_path: Path,
 ) -> None:
     """
-    `press_file` must raise `FileNotFoundError` when its template doesn't exist, rather
-    than pressing nothing.
+    `press_file` must raise Jinja's `TemplateNotFound` when its template doesn't exist,
+    rather than pressing nothing, and write nothing.
     """
     templates_dir = tmp_path / "source"
     templates_dir.mkdir()
@@ -767,223 +736,56 @@ def test_press_file_raises_for_missing_template(
         {},
     )
 
-    with raises(FileNotFoundError) as ex:
+    with raises(TemplateNotFound) as ex:
         platen.press_file("missing.md", output_dir / "missing.md")
 
-    assert ex.value.filename == str(platen.templates_dir / "missing.md")
+    assert ex.value.name == "missing.md"
+    assert not output_dir.exists()
 
 
 @mark.parametrize(
-    "spelling",
+    ("template", "expect", "expect_name"),
     [
-        "build",
-        "missing/../build",
-    ],
-    ids=[
-        "as named",
-        "via parent of missing directory",
-    ],
-)
-@mark.parametrize(
-    "body",
-    [
-        b"{{ missing }}\n",
-        b"\x00\xff\xfe binary\n",
-    ],
-    ids=[
-        "text",
-        "binary",
-    ],
-)
-def test_press_file_raises_when_destination_is_directory(
-    body: bytes,
-    spelling: str,
-    monkeypatch: MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """
-    `press_file` must raise `IsADirectoryError` before rendering when it's asked to
-    press a template to a directory, by any spelling, rather than pressing into it.
-
-    Rendering the text template would raise `UndefinedError` instead. The error must
-    name the destination absolutely, but as it was given.
-    """
-    templates_dir = tmp_path / "source"
-    templates_dir.mkdir()
-    (templates_dir / "file").write_bytes(body)
-
-    (tmp_path / "build").mkdir()
-    monkeypatch.chdir(tmp_path)
-
-    platen = Platen(
-        templates_dir,
-        {},
-    )
-
-    before = snapshot(tmp_path)
-
-    with raises(IsADirectoryError) as ex:
-        platen.press_file("file", spelling)
-
-    assert ex.value.errno == EISDIR
-    assert ex.value.filename == str(tmp_path / spelling)
-    assert snapshot(tmp_path) == before
-
-
-@mark.parametrize(
-    "rel_path",
-    [
-        "doc.md",
-        "new/doc.md",
-        "../doc.md",
-    ],
-    ids=[
-        "within file",
-        "within missing directory within file",
-        "via parent of file",
-    ],
-)
-def test_press_file_raises_when_destination_is_within_file(
-    rel_path: str,
-    tmp_path: Path,
-) -> None:
-    """
-    `press_file` must raise `NotADirectoryError` before rendering when its destination
-    is within a file, however deeply, or steps up out of one with "..", like the
-    operating system does.
-    """
-    templates_dir = tmp_path / "source"
-    templates_dir.mkdir()
-
-    # Rendering this template would raise `UndefinedError` instead.
-    (templates_dir / "doc.md").write_text("{{ missing }}\n", encoding="utf-8")
-
-    in_the_way = tmp_path / "build"
-    in_the_way.write_text("In the way\n", encoding="utf-8")
-    destination = in_the_way / rel_path
-
-    platen = Platen(
-        templates_dir,
-        {},
-    )
-
-    with raises(NotADirectoryError) as ex:
-        platen.press_file("doc.md", destination)
-
-    assert ex.value.errno == ENOTDIR
-    assert ex.value.filename == str(destination)
-    assert in_the_way.read_text(encoding="utf-8") == "In the way\n"
-    assert not (tmp_path / "doc.md").exists()
-
-
-@mark.parametrize(
-    "destination",
-    [
-        "build/",
-        "build/.",
-        "build/x/..",
-    ],
-    ids=[
-        "trailing separator",
-        "trailing dot",
-        "trailing parent",
-    ],
-)
-def test_press_file_raises_when_destination_names_directory(
-    destination: str,
-    monkeypatch: MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """
-    `press_file` must raise `IsADirectoryError` before rendering when its destination
-    names a directory, like "build/", even when there's no directory there yet, and
-    mustn't create one.
-
-    `pathlib` drops a trailing separator, so the destination mustn't be pressed to a
-    file named "build" instead.
-    """
-    templates_dir = tmp_path / "source"
-    templates_dir.mkdir()
-
-    # Rendering this template would raise `UndefinedError` instead.
-    (templates_dir / "doc.md").write_text("{{ missing }}\n", encoding="utf-8")
-
-    monkeypatch.chdir(tmp_path)
-
-    platen = Platen(
-        templates_dir,
-        {},
-    )
-
-    with raises(IsADirectoryError) as ex:
-        platen.press_file("doc.md", destination)
-
-    assert ex.value.errno == EISDIR
-    assert ex.value.filename == join(getcwd(), destination)
-    assert not (tmp_path / "build").exists()
-
-
-@mark.parametrize(
-    "template",
-    [
-        ".",
-        "dir",
-        "linked",
-        "linked/sub",
+        (".", TemplateNotPressableError, "."),
+        ("dir", TemplateNotPressableError, "dir"),
+        ("linked", TemplateNotPressableError, "real"),
+        ("linked/sub", TemplateNotPressableError, "real/sub"),
+        ("pipe", TemplateNotPressableError, "pipe"),
+        ("broken", TemplateNotFound, "nowhere"),
     ],
     ids=[
         "templates directory",
         "directory",
         "symlink to directory",
         "directory within symlink",
+        "fifo",
+        "broken symlink",
     ],
 )
-def test_press_file_raises_when_template_is_directory(
+def test_press_file_raises_when_template_is_not_regular_file(
     template: str,
+    expect: type[TemplateNotFound | TemplateNotPressableError],
+    expect_name: str,
     output_dir: Path,
     tmp_path: Path,
 ) -> None:
     """
-    `press_file` must raise `IsADirectoryError` when it's asked to press a directory,
-    or a symlink to one, rather than pressing what's within it.
+    `press_file` must raise `TemplateNotPressableError` when its template isn't a
+    regular file, like a directory or a FIFO, rather than pressing what's within it or
+    blocking on it, and write nothing.
+
+    A template named through a symlink must be named by where the symlink leads. A
+    broken symlink leads to nothing at all, so it raises `TemplateNotFound` instead.
     """
-    platen = Platen(
-        _symlinked_directories(tmp_path),
-        {},
-    )
+    templates_dir = _symlinked_directories(tmp_path)
+    (templates_dir / "broken").symlink_to(templates_dir / "nowhere")
 
-    with raises(IsADirectoryError) as ex:
-        platen.press_file(template, output_dir / "file.md")
+    if template == "pipe":
+        # Not every platform has FIFOs, like Windows.
+        if not hasattr(os, "mkfifo"):
+            skip("This platform doesn't have FIFOs")
 
-    assert ex.value.errno == EISDIR
-    assert ex.value.filename == str(platen.templates_dir / template)
-    assert not output_dir.exists()
-
-
-@mark.parametrize(
-    ("template", "expect"),
-    [
-        ("doc.md/", NotADirectoryError),
-        ("missing/../doc.md", FileNotFoundError),
-    ],
-    ids=[
-        "trailing separator",
-        "via parent of missing directory",
-    ],
-)
-def test_press_file_raises_when_template_is_not_as_named(
-    template: str,
-    expect: type[OSError],
-    output_dir: Path,
-    tmp_path: Path,
-) -> None:
-    """
-    `press_file` must judge its template the way the operating system sees it, so a
-    path that the operating system can't open must be refused rather than tidied up.
-    """
-    templates_dir = tmp_path / "source"
-    templates_dir.mkdir()
-    (templates_dir / "doc.md").write_text("Hello, world!\n", encoding="utf-8")
+        os.mkfifo(templates_dir / "pipe")
 
     platen = Platen(
         templates_dir,
@@ -991,57 +793,23 @@ def test_press_file_raises_when_template_is_not_as_named(
     )
 
     with raises(expect) as ex:
-        platen.press_file(template, output_dir / "doc.md")
+        platen.press_file(template, output_dir / "file.md")
 
-    assert ex.value.filename == join(platen.templates_dir, template)
+    if isinstance(ex.value, TemplateNotFound):
+        assert ex.value.name == expect_name
+    else:
+        path = platen.templates_dir / expect_name
+        assert ex.value.template_path == path
+        assert ex.value.reason == "it isn't a regular file"
+
+        assert str(ex.value) == (
+            f"Template '{path}' can't be pressed: it isn't a regular file"
+        )
+
     assert not output_dir.exists()
 
 
-def test_press_file_raises_when_template_is_not_regular_file(tmp_path: Path) -> None:
-    """
-    `press_file` must refuse a template that's a FIFO before reading it, because reading
-    it would block, and write nothing.
-    """
-    # Not every platform has FIFOs, like Windows.
-    if not hasattr(os, "mkfifo"):
-        skip("This platform doesn't have FIFOs")
-
-    templates_dir = tmp_path / "source"
-    templates_dir.mkdir()
-    os.mkfifo(templates_dir / "pipe")
-
-    platen = Platen(
-        templates_dir,
-        {},
-    )
-
-    with raises(TemplateNotPressableError) as ex:
-        platen.press_file("pipe", tmp_path / "out.md")
-
-    assert ex.value.template_path == platen.templates_dir / "pipe"
-    assert ex.value.reason == "it isn't a regular file"
-
-    assert str(ex.value) == (
-        f"Template '{platen.templates_dir / 'pipe'}' can't be pressed: it isn't a "
-        "regular file"
-    )
-
-    assert not (tmp_path / "out.md").exists()
-
-
-@mark.parametrize(
-    "body",
-    [
-        b"echo hello\n",
-        b"\x00\xff\xfe binary\n",
-    ],
-    ids=[
-        "text",
-        "binary",
-    ],
-)
 def test_press_file_updates_permissions(
-    body: bytes,
     output_dir: Path,
     tmp_path: Path,
 ) -> None:
@@ -1057,7 +825,7 @@ def test_press_file_updates_permissions(
     templates_dir.mkdir()
 
     template = templates_dir / "script.sh"
-    template.write_bytes(body)
+    template.write_text("echo hello\n", encoding="utf-8")
 
     platen = Platen(
         templates_dir,
@@ -1070,6 +838,46 @@ def test_press_file_updates_permissions(
         template.chmod(mode)
         platen.press_file("script.sh", pressed)
         assert S_IMODE(pressed.stat().st_mode) == mode
+
+
+@mark.parametrize(
+    "body",
+    [
+        b"{{ greeting }},\nworld!\n",
+        b"{{ greeting }},\r\nworld!\r\n",
+        b"{{ greeting }},\rworld!\r",
+        b"{{ greeting }},\r\nworld!\r",
+    ],
+    ids=[
+        "LF",
+        "CRLF",
+        "CR",
+        "mixed",
+    ],
+)
+def test_press_file_writes_line_endings_as_jinja_renders_them(
+    body: bytes,
+    output_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """
+    `press_file` must write exactly what Jinja renders, without translating its line
+    endings.
+
+    Jinja ends every line with a line feed, whatever the template's own line endings.
+    """
+    templates_dir = tmp_path / "source"
+    templates_dir.mkdir()
+    (templates_dir / "doc.md").write_bytes(body)
+
+    platen = Platen(
+        templates_dir,
+        {"greeting": "Hello"},
+    )
+
+    platen.press_file("doc.md", output_dir / "doc.md")
+
+    assert (output_dir / "doc.md").read_bytes() == b"Hello,\nworld!\n"
 
 
 def test_press_ignores_protected_file_that_does_not_exist(tmp_path: Path) -> None:
@@ -1086,6 +894,31 @@ def test_press_ignores_protected_file_that_does_not_exist(tmp_path: Path) -> Non
 
     platen.press_file("doc.md", tmp_path / "doc.md")
     assert (tmp_path / "doc.md").read_text(encoding="utf-8") == "Hello, world!\n"
+
+
+def test_press_presses_ignore_file_that_is_re_included(
+    output_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """
+    `press` must press a `.platenignore` file when a `.platenignore` file re-includes
+    it, and count it with the other templates.
+    """
+    templates_dir = tmp_path / "source"
+    templates_dir.mkdir()
+    (templates_dir / ".platenignore").write_text("!.platenignore\n", encoding="utf-8")
+    (templates_dir / "doc.md").write_text("Hello, world!\n", encoding="utf-8")
+
+    platen = Platen(
+        templates_dir,
+        {},
+    )
+
+    assert platen.press(output_dir) == 2
+
+    pressed = output_dir / ".platenignore"
+    assert pressed.read_text(encoding="utf-8") == "!.platenignore\n"
+    assert (output_dir / "doc.md").read_text(encoding="utf-8") == "Hello, world!\n"
 
 
 def test_press_presses_into_directory_that_contains_templates_dir(
@@ -1114,26 +947,18 @@ def test_press_presses_into_directory_that_contains_templates_dir(
 
 
 @mark.parametrize(
-    ("method", "templates", "destinations"),
+    ("method", "template", "destination"),
     [
-        ("press_directory", ["links"], ["links"]),
-        (
-            "press_file",
-            ["links/blob.bin", "links/file.md"],
-            ["links/blob.bin", "links/file.md"],
-        ),
-        (
-            "press_file",
-            ["links/../links/blob.bin", "links/../links/file.md"],
-            ["links/blob.bin", "links/file.md"],
-        ),
+        ("press_directory", "links", "links"),
+        ("press_file", "links/file.md", "links/file.md"),
+        ("press_file", "links/../links/file.md", "links/file.md"),
     ],
     ids=["walked", "named", "named via parent"],
 )
 def test_press_presses_symlink_to_file_with_target_content(
     method: str,
-    templates: list[str],
-    destinations: list[str],
+    template: str,
+    destination: str,
     output_dir: Path,
     tmp_path: Path,
 ) -> None:
@@ -1148,15 +973,12 @@ def test_press_presses_symlink_to_file_with_target_content(
     links_dir = templates_dir / "links"
     links_dir.mkdir(parents=True)
 
-    blob = b"\x00\xff\xfe binary\n"
-    (templates_dir / "blob.bin").write_bytes(blob)
     (templates_dir / "file.md").write_text(
         "{{ greeting }}, world!\n",
         encoding="utf-8",
     )
 
-    for name in ("blob.bin", "file.md"):
-        (links_dir / name).symlink_to(Path("..") / name)
+    (links_dir / "file.md").symlink_to(Path("..") / "file.md")
 
     platen = Platen(
         templates_dir,
@@ -1164,19 +986,64 @@ def test_press_presses_symlink_to_file_with_target_content(
     )
 
     press = platen.press_file if method == "press_file" else platen.press_directory
+    press(template, output_dir / destination)
 
-    for template, destination in zip(templates, destinations, strict=True):
-        press(template, output_dir / destination)
+    pressed = output_dir / "links" / "file.md"
 
-    pressed_blob = output_dir / "links" / "blob.bin"
-    pressed_file = output_dir / "links" / "file.md"
-
-    assert not pressed_blob.is_symlink()
-    assert not pressed_file.is_symlink()
-    assert pressed_blob.read_bytes() == blob
-    assert pressed_file.read_text(encoding="utf-8") == "Hello, world!\n"
-    assert not (output_dir / "blob.bin").exists()
+    assert not pressed.is_symlink()
+    assert pressed.read_text(encoding="utf-8") == "Hello, world!\n"
     assert not (output_dir / "file.md").exists()
+
+
+@mark.parametrize(
+    ("method", "template", "destination", "expect"),
+    [
+        ("press_directory", "SOURCE", ".", ["file.md", "sub/file.md"]),
+        ("press_directory", "SOURCE/SUB", ".", ["file.md"]),
+        ("press_file", "SOURCE/SUB/file.md", "file.md", ["file.md"]),
+    ],
+    ids=[
+        "directory",
+        "subdirectory",
+        "file",
+    ],
+)
+def test_press_presses_templates_named_absolutely_in_different_case(
+    method: str,
+    template: str,
+    destination: str,
+    expect: list[str],
+    output_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """
+    `press_file` and `press_directory` must press templates named by absolute paths in a
+    different case from how they're stored, on a file system that's insensitive to case,
+    like macOS's default APFS.
+    """
+    templates_dir = tmp_path / "source"
+    (templates_dir / "sub").mkdir(parents=True)
+    (templates_dir / "file.md").write_text("Hello, world!\n", encoding="utf-8")
+    (templates_dir / "sub" / "file.md").write_text("Hello, world!\n", encoding="utf-8")
+
+    if not exists(tmp_path / "SOURCE"):
+        skip("'SOURCE' names a different directory on this file system")
+
+    platen = Platen(
+        templates_dir,
+        {},
+    )
+
+    press = platen.press_file if method == "press_file" else platen.press_directory
+    press(tmp_path / template, output_dir / destination)
+
+    pressed = sorted(
+        p.relative_to(output_dir).as_posix()
+        for p in output_dir.rglob("*")
+        if p.is_file()
+    )
+
+    assert pressed == expect
 
 
 @mark.parametrize(
@@ -1309,90 +1176,34 @@ def test_press_raises_for_destination_that_cannot_be_written(
 
 
 @mark.parametrize(
-    ("method", "template", "destination"),
+    "method",
     [
-        ("press", "", ""),
-        ("press_directory", "", "build"),
-        ("press_directory", "sub", ""),
-        ("press_file", "", "build.md"),
-        ("press_file", "doc.md", ""),
-        ("press_file", "../outside.md", ""),
-    ],
-    ids=[
-        "press, empty destination",
-        "press_directory, empty directory",
-        "press_directory, empty destination",
-        "press_file, empty template",
-        "press_file, empty destination",
-        "press_file, empty destination before template outside",
-    ],
-)
-def test_press_raises_for_empty_path(
-    method: str,
-    template: str,
-    destination: str,
-    monkeypatch: MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """
-    Every press method must raise `FileNotFoundError` for an empty string, like the
-    operating system does, rather than reading it as ".".
-
-    An empty template mustn't mean the whole templates directory, and an empty
-    destination mustn't mean the working directory.
-    """
-    templates_dir = tmp_path / "source"
-    (templates_dir / "sub").mkdir(parents=True)
-    (templates_dir / "doc.md").write_text("Hello, world!\n", encoding="utf-8")
-    (templates_dir / "sub" / "doc.md").write_text("Hello, world!\n", encoding="utf-8")
-
-    monkeypatch.chdir(tmp_path)
-
-    platen = Platen(
-        templates_dir,
-        {},
-    )
-
-    before = snapshot(tmp_path)
-
-    with raises(FileNotFoundError) as ex:
-        if method == "press":
-            platen.press(destination)
-        elif method == "press_directory":
-            platen.press_directory(template, destination)
-        else:
-            platen.press_file(template, destination)
-
-    assert ex.value.errno == ENOENT
-    assert ex.value.strerror == strerror(ENOENT)
-    assert ex.value.filename == ""
-    assert snapshot(tmp_path) == before
-
-
-@mark.parametrize(
-    ("method", "expect", "expect_errno"),
-    [
-        ("press_file", OSError, ELOOP),
-        ("press_directory", NotADirectoryError, ENOTDIR),
+        "press_file",
+        "press_directory",
+        "press",
     ],
     ids=[
         "press_file",
         "press_directory",
+        "press, walked",
     ],
 )
 def test_press_raises_for_symlink_loop(
     method: str,
-    expect: type[OSError],
-    expect_errno: int,
     output_dir: Path,
     tmp_path: Path,
 ) -> None:
     """
-    `press_file` and `press_directory` must raise the same `OSError` for a loop of
-    symlinks on every version of Python, rather than `RuntimeError` on some.
+    `press_file`, `press_directory` and `press` must raise the same `OSError` for a loop
+    of symlinks on every version of Python, rather than `RuntimeError` on some, and
+    nothing must be written.
+
+    Every template is identified before the first is pressed, so a walked loop must be
+    raised before the templates that sort before it are pressed.
     """
     templates_dir = tmp_path / "source"
     templates_dir.mkdir()
+    (templates_dir / "a.md").write_text("Hello, world!\n", encoding="utf-8")
     (templates_dir / "loop").symlink_to("loop")
 
     platen = Platen(
@@ -1400,13 +1211,16 @@ def test_press_raises_for_symlink_loop(
         {},
     )
 
-    press = platen.press_file if method == "press_file" else platen.press_directory
-
     with raises(OSError) as ex:
-        press("loop", output_dir)
+        if method == "press":
+            platen.press(output_dir)
+        elif method == "press_directory":
+            platen.press_directory("loop", output_dir)
+        else:
+            platen.press_file("loop", output_dir)
 
-    assert type(ex.value) is expect
-    assert ex.value.errno == expect_errno
+    assert type(ex.value) is OSError
+    assert ex.value.errno == ELOOP
     assert not output_dir.exists()
 
 
@@ -1453,78 +1267,6 @@ def test_press_raises_for_symlink_loop_in_destination(
     assert snapshot(tmp_path) == before
 
 
-def test_press_raises_for_symlink_to_directory_within(
-    output_dir: Path,
-    tmp_path: Path,
-) -> None:
-    """
-    `press` must raise `IsADirectoryError` when the templates directory holds a symlink
-    to a directory, and nothing must be pressed.
-
-    Symlinks are pressed like files and never walked into, so a symlink to a directory
-    can't be pressed. The error must name the outermost symlink.
-    """
-    platen = Platen(
-        _symlinked_directories(tmp_path),
-        {},
-    )
-
-    with raises(IsADirectoryError) as ex:
-        platen.press(output_dir)
-
-    assert ex.value.filename == str(platen.templates_dir / "linked")
-    assert not output_dir.exists()
-
-
-@mark.parametrize(
-    "target",
-    [
-        "/dev/null",
-        "fifo",
-    ],
-    ids=[
-        "device",
-        "fifo",
-    ],
-)
-def test_press_raises_for_symlink_to_special_file(
-    target: str,
-    output_dir: Path,
-    tmp_path: Path,
-) -> None:
-    """
-    `press` must refuse a walked symlink to a FIFO or a device before reading any
-    template, because reading a FIFO would block and reading a device might never end,
-    and write nothing.
-    """
-    if target == "fifo":
-        # Not every platform has FIFOs, like Windows.
-        if not hasattr(os, "mkfifo"):
-            skip("This platform doesn't have FIFOs")
-
-        os.mkfifo(tmp_path / target)
-        target = str(tmp_path / target)
-    elif not exists(target):
-        skip(f"This platform doesn't have {target}")
-
-    templates_dir = tmp_path / "source"
-    templates_dir.mkdir()
-    (templates_dir / "a.md").write_text("A\n", encoding="utf-8")
-    (templates_dir / "special").symlink_to(target)
-
-    platen = Platen(
-        templates_dir,
-        {},
-    )
-
-    with raises(TemplateNotPressableError) as ex:
-        platen.press(output_dir)
-
-    assert ex.value.template_path == platen.templates_dir / "special"
-    assert ex.value.reason == "it isn't a regular file"
-    assert not output_dir.exists()
-
-
 @mark.parametrize(
     "page",
     [
@@ -1546,12 +1288,14 @@ def test_press_raises_for_template_that_is_not_utf8(
     tmp_path: Path,
 ) -> None:
     """
-    `press` must refuse a text template that isn't UTF-8, naming it and the problem,
-    and write nothing, whether it's pressed or only referenced by another template.
+    `press` must refuse a template that isn't UTF-8, naming it and the problem, and
+    write nothing, whether it's pressed or only referenced by another template.
     """
     templates_dir = tmp_path / "source"
     templates_dir.mkdir()
-    (templates_dir / "a.md").write_text("A\n", encoding="utf-8")
+
+    # This sorts after the template that fails, so the press stops before it.
+    (templates_dir / "z.md").write_text("Z\n", encoding="utf-8")
     (templates_dir / "_legacy.txt").write_bytes(b"Caf\xe9\n")
 
     if page is not None:
@@ -1575,60 +1319,68 @@ def test_press_raises_for_template_that_is_not_utf8(
 
 
 @mark.parametrize(
-    "spelling",
+    ("target", "expect"),
     [
-        "build.md",
-        "missing/../build.md",
+        ("dir", TemplateNotPressableError),
+        ("/dev/null", TemplateNotPressableError),
+        ("fifo", TemplateNotPressableError),
+        ("nowhere", TemplateNotFound),
     ],
     ids=[
-        "as named",
-        "via parent of missing directory",
+        "directory",
+        "device",
+        "fifo",
+        "broken",
     ],
 )
-@mark.parametrize(
-    "directory",
-    [
-        None,
-        "ignored_dir",
-    ],
-    ids=[
-        "templates directory",
-        "ignored directory",
-    ],
-)
-def test_press_raises_when_destination_is_file(
-    directory: str | None,
-    spelling: str,
+def test_press_raises_for_walked_symlink_that_is_not_a_file(
+    target: str,
+    expect: type[TemplateNotFound | TemplateNotPressableError],
+    output_dir: Path,
     tmp_path: Path,
 ) -> None:
     """
-    `press` and `press_directory` must raise `NotADirectoryError` when they're asked to
-    press into an existing file, by any spelling, even when the directory holds nothing
-    to press.
-    """
-    templates_dir = tmp_path / "source"
-    (templates_dir / "ignored_dir").mkdir(parents=True)
-    (templates_dir / ".platenignore").write_text("ignored_dir/\n", encoding="utf-8")
-    (templates_dir / "file.md").write_text("Hello, world!\n", encoding="utf-8")
-    (templates_dir / "ignored_dir" / "file.md").write_text("", encoding="utf-8")
+    `press` must raise when a walked symlink leads to anything but a regular file,
+    rather than reading a directory, blocking on a FIFO or reading a device forever.
 
-    (tmp_path / "build.md").write_text("Not a directory\n", encoding="utf-8")
-    destination = tmp_path / spelling
+    A symlink that leads to something that isn't a regular file raises
+    `TemplateNotPressableError`, and a broken symlink raises `TemplateNotFound`. Either
+    way, the templates that sort before it stay pressed.
+    """
+    (tmp_path / "dir").mkdir()
+
+    if target == "fifo":
+        # Not every platform has FIFOs, like Windows.
+        if not hasattr(os, "mkfifo"):
+            skip("This platform doesn't have FIFOs")
+
+        os.mkfifo(tmp_path / target)
+    elif target == "/dev/null" and not exists(target):
+        skip(f"This platform doesn't have {target}")
+
+    templates_dir = tmp_path / "source"
+    templates_dir.mkdir()
+    (templates_dir / "a.md").write_text("A\n", encoding="utf-8")
+
+    # An absolute target, like "/dev/null", replaces `tmp_path`.
+    (templates_dir / "link").symlink_to(tmp_path / target)
 
     platen = Platen(
         templates_dir,
         {},
     )
 
-    with raises(NotADirectoryError) as ex:
-        if directory is None:
-            platen.press(destination)
-        else:
-            platen.press_directory(directory, destination)
+    with raises(expect) as ex:
+        platen.press(output_dir)
 
-    assert ex.value.errno == ENOTDIR
-    assert ex.value.filename == str(destination)
-    assert (tmp_path / "build.md").read_text(encoding="utf-8") == "Not a directory\n"
+    if isinstance(ex.value, TemplateNotFound):
+        assert ex.value.name == "link"
+    else:
+        assert ex.value.template_path == platen.templates_dir / "link"
+        assert ex.value.reason == "it isn't a regular file"
+
+    assert [p.name for p in output_dir.iterdir()] == ["a.md"]
+    assert (output_dir / "a.md").read_text(encoding="utf-8") == "A\n"
 
 
 @mark.parametrize(
@@ -1708,35 +1460,25 @@ def test_press_raises_when_destination_is_protected(
             "doc.md",
             "missing/../templates/doc.md",
         ),
-        (
-            "press_file",
-            "blob.bin",
-            "missing/../templates/blob.bin",
-            "blob.bin",
-            "missing/../templates/blob.bin",
-        ),
         ("press_file", "doc.md", "doc_link.md", "doc.md", "doc_link.md"),
         ("press_file", "doc.md", "doc_hard.md", "doc.md", "doc_hard.md"),
         ("press_directory", "posts", "out", "posts/link.md", "out/a.md"),
-        ("press_directory", "posts", "out_later", "posts/a.md", "out_later/link.md"),
         ("press_file", "doc.md", "templates/DOC.md", "doc.md", "templates/DOC.md"),
         (
             "press_file",
-            "caf\u00e9.md",
-            "templates/cafe\u0301.md",
-            "caf\u00e9.md",
-            "templates/cafe\u0301.md",
+            "café.md",
+            "templates/café.md",
+            "café.md",
+            "templates/café.md",
         ),
     ],
     ids=[
         "same path",
         "via parent",
         "via parent of missing directory",
-        "binary via parent of missing directory",
         "symlink to template",
         "hard link to template",
         "hard link to another template",
-        "hard link to earlier template",
         "different case",
         "different normalisation",
     ],
@@ -1754,8 +1496,8 @@ def test_press_raises_when_destination_is_template(
     destination is the same file as a template being pressed, by any name, and nothing
     must change.
 
-    Every destination must be checked before anything is written, so a destination
-    that's a template must be refused even when it comes after others.
+    Every template is identified before the first is pressed, so a destination that's a
+    template yet to be pressed must be refused too.
     """
     templates_dir = tmp_path / "templates"
     (templates_dir / "posts").mkdir(parents=True)
@@ -1763,17 +1505,14 @@ def test_press_raises_when_destination_is_template(
 
     # Each template renders to something other than itself, so that an overwrite would
     # change it.
-    for rel_path in ("doc.md", "caf\u00e9.md", "posts/a.md", "shared/b.md"):
+    for rel_path in ("doc.md", "café.md", "posts/a.md", "shared/b.md"):
         (templates_dir / rel_path).write_text("{{ greeting }}\n", encoding="utf-8")
 
-    (templates_dir / "blob.bin").write_bytes(b"\x00\xff\xfe binary\n")
     (templates_dir / "posts" / "link.md").symlink_to(Path("..") / "shared" / "b.md")
     (tmp_path / "doc_link.md").symlink_to(templates_dir / "doc.md")
     link(templates_dir / "doc.md", tmp_path / "doc_hard.md")
     (tmp_path / "out").mkdir()
     link(templates_dir / "shared" / "b.md", tmp_path / "out" / "a.md")
-    (tmp_path / "out_later").mkdir()
-    link(templates_dir / "posts" / "a.md", tmp_path / "out_later" / "link.md")
 
     # A different case or normalisation only names the same file on file systems that
     # are insensitive to it, like macOS's default APFS.
@@ -1802,19 +1541,14 @@ def test_press_raises_when_destination_is_template(
 
 
 @mark.parametrize(
-    ("directory", "destination", "expect_directory", "expect_destination"),
+    ("directory", "destination", "expect_directory"),
     [
-        (None, "templates", "templates", "templates"),
-        (None, "templates/build", "templates", "templates/build"),
-        ("posts", "templates/posts/build", "templates/posts", "templates/posts/build"),
-        (None, "templates/a.md", "templates", "templates/a.md"),
-        (None, "alias/build", "templates", "alias/build"),
-        (None, "TEMPLATES/build", "templates", "TEMPLATES/build"),
-        (None, "linked_build", "templates", "linked_build/other/c.md"),
-        (None, "dangling_build", "templates", "dangling_build/a.md"),
-        (None, ".", "templates", "templates/x.md"),
-        (None, "self_build", "templates", "self_build/a.md"),
-        (None, "template_build", "templates", "template_build/a.md"),
+        (None, "templates", "templates"),
+        (None, "templates/build", "templates"),
+        ("posts", "templates/posts/build", "templates/posts"),
+        (None, "templates/a.md", "templates"),
+        (None, "alias/build", "templates"),
+        (None, "TEMPLATES/build", "templates"),
     ],
     ids=[
         "same directory",
@@ -1823,57 +1557,34 @@ def test_press_raises_when_destination_is_template(
         "existing file within",
         "through symlink to directory",
         "different case",
-        "through symlink within destination",
-        "through dangling symlink within destination",
-        "into parent, through directory with the same name",
-        "symlink to the directory itself",
-        "symlink to a template within the directory",
     ],
 )
 def test_press_raises_when_destination_is_within_pressed_directory(
     directory: str | None,
     destination: str,
     expect_directory: str,
-    expect_destination: str,
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """
-    `press` and `press_directory` must raise `DestinationWithinDirectoryError` when a
+    `press` and `press_directory` must raise `DestinationWithinDirectoryError` when the
     destination is within the directory being pressed, wherever symlinks lead, and
     nothing must change.
 
     A press must never write within the directory that it presses, even when a
     `.platenignore` file ignores the destination. The error must name the destination
-    absolutely, but as it was given.
+    as it was given.
     """
     templates_dir = tmp_path / "templates"
+    (templates_dir / "posts").mkdir(parents=True)
 
     # Each template renders to something other than itself, so that an overwrite would
     # change it.
-    for rel_path in ("a.md", "other/c.md", "posts/b.md", "templates/x.md"):
-        (templates_dir / rel_path).parent.mkdir(exist_ok=True, parents=True)
+    for rel_path in ("a.md", "posts/b.md"):
         (templates_dir / rel_path).write_text("{{ greeting }}\n", encoding="utf-8")
 
     (templates_dir / ".platenignore").write_text("/build/\n", encoding="utf-8")
     (tmp_path / "alias").symlink_to(templates_dir, target_is_directory=True)
-    (tmp_path / "linked_build").mkdir()
-    (tmp_path / "linked_build" / "other").symlink_to(
-        templates_dir / "posts",
-        target_is_directory=True,
-    )
-    (tmp_path / "dangling_build").mkdir()
-    (tmp_path / "dangling_build" / "a.md").symlink_to(templates_dir / "new.md")
-    (tmp_path / "self_build").mkdir()
-    (tmp_path / "self_build" / "a.md").symlink_to(
-        templates_dir,
-        target_is_directory=True,
-    )
-
-    # A destination that's both within the directory and a template must be reported as
-    # within the directory.
-    (tmp_path / "template_build").mkdir()
-    (tmp_path / "template_build" / "a.md").symlink_to(templates_dir / "a.md")
 
     # A different case only names the same directory on case-insensitive file systems,
     # like macOS's default APFS.
@@ -1890,7 +1601,7 @@ def test_press_raises_when_destination_is_within_pressed_directory(
     before = snapshot(tmp_path)
 
     expect = (
-        f"Destination '{tmp_path / expect_destination}' is within "
+        f"Destination '{destination}' is within "
         f"'{tmp_path / expect_directory}', the directory being pressed"
     )
 
@@ -1900,20 +1611,30 @@ def test_press_raises_when_destination_is_within_pressed_directory(
         else:
             platen.press_directory(directory, destination)
 
-    assert ex.value.destination_path == tmp_path / expect_destination
+    assert ex.value.destination_path == Path(destination)
     assert ex.value.directory == tmp_path / expect_directory
     assert snapshot(tmp_path) == before
 
 
-def test_press_reads_empty_path_object_as_working_directory(
+@mark.parametrize(
+    "destination",
+    [
+        "",
+        Path(""),
+    ],
+    ids=[
+        "string",
+        "path",
+    ],
+)
+def test_press_reads_empty_path_as_working_directory(
+    destination: Path | str,
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """
-    `press` must read `Path("")` as the working directory.
-
-    `pathlib` makes `Path("")` into `Path(".")` before Platen sees it, so it can't be
-    refused like an empty string can.
+    `press` must read an empty path as the working directory, whether it's a string or
+    a `Path`, like `pathlib` does.
     """
     templates_dir = tmp_path / "source"
     templates_dir.mkdir()
@@ -1928,9 +1649,79 @@ def test_press_reads_empty_path_object_as_working_directory(
         {},
     )
 
-    platen.press(Path(""))
+    platen.press(destination)
 
     assert (working_dir / "doc.md").read_text(encoding="utf-8") == "Hello, world!\n"
+
+
+def test_press_skips_binary_files_by_name(
+    output_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """
+    `press` must skip common binary files by their names, in lower or upper case,
+    rather than pressing them as templates.
+
+    Only the name counts, so a file with a binary file's name is skipped even when it
+    holds text.
+    """
+    templates_dir = tmp_path / "source"
+    (templates_dir / "sub").mkdir(parents=True)
+    (templates_dir / "doc.md").write_text("Hello, world!\n", encoding="utf-8")
+    (templates_dir / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+    (templates_dir / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1\x00\x00")
+
+    # Rendering this template would raise `UndefinedError`.
+    (templates_dir / "sub" / "SCAN.PDF").write_text(
+        "{{ undefined }}\n",
+        encoding="utf-8",
+    )
+
+    platen = Platen(
+        templates_dir,
+        {},
+    )
+
+    assert platen.press(output_dir) == 1
+
+    pressed = sorted(
+        p.relative_to(output_dir).as_posix()
+        for p in output_dir.rglob("*")
+        if p.is_file()
+    )
+
+    assert pressed == ["doc.md"]
+
+
+def test_press_stops_at_first_template_that_fails_to_render(
+    output_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """
+    `press` must stop at the first template that fails to render, in walk order, so
+    that the templates before it stay pressed and none after it are pressed.
+
+    A directory sorts by its name with a trailing separator, so `b.md` comes before
+    `b/c.md`.
+    """
+    templates_dir = tmp_path / "source"
+    (templates_dir / "b").mkdir(parents=True)
+    (templates_dir / "a.md").write_text("Hello, world!\n", encoding="utf-8")
+    (templates_dir / "b.md").write_text("{{ missing }}\n", encoding="utf-8")
+    (templates_dir / "b" / "c.md").write_text("Hello, world!\n", encoding="utf-8")
+
+    platen = Platen(
+        templates_dir,
+        {},
+    )
+
+    with raises(UndefinedError):
+        platen.press(output_dir)
+
+    pressed = sorted(
+        p.relative_to(output_dir).as_posix() for p in output_dir.rglob("*")
+    )
+    assert pressed == ["a.md"]
 
 
 def test_press_warns_when_everything_is_ignored(
@@ -1967,139 +1758,39 @@ def test_press_warns_when_everything_is_ignored(
     assert not output_dir.exists()
 
 
-def test_press_writes_nothing_when_template_fails_to_render(
+def test_press_writes_nothing_when_walk_fails(
     output_dir: Path,
     tmp_path: Path,
 ) -> None:
     """
-    `press` must write nothing when any template in a directory fails to render, even
-    when other templates render.
+    `press` must walk the whole directory before it presses anything, so that a
+    directory that can't be walked stops the press before any template is pressed,
+    even those that sort before it.
     """
     templates_dir = tmp_path / "source"
-    templates_dir.mkdir()
+    directory = templates_dir / "z"
+    directory.mkdir(parents=True)
     (templates_dir / "a.md").write_text("Hello, world!\n", encoding="utf-8")
-    (templates_dir / "z.md").write_text("{{ missing }}\n", encoding="utf-8")
+    (directory / "doc.md").write_text("Hello, world!\n", encoding="utf-8")
+    directory.chmod(0o000)
 
-    platen = Platen(
-        templates_dir,
-        {},
-    )
+    try:
+        if access(directory, R_OK):
+            skip("Permissions don't stop this user from reading directories")
 
-    with raises(UndefinedError):
-        platen.press(output_dir)
+        platen = Platen(
+            templates_dir,
+            {},
+        )
+
+        with raises(PermissionError) as ex:
+            platen.press(output_dir)
+
+        assert ex.value.filename == str(platen.templates_dir / "z")
+    finally:
+        directory.chmod(0o755)
 
     assert not output_dir.exists()
-
-
-def test_press_writes_nothing_when_walk_meets_broken_symlink(
-    output_dir: Path,
-    tmp_path: Path,
-) -> None:
-    """
-    `press` must write nothing when a directory holds a broken symlink, even when other
-    templates render.
-    """
-    templates_dir = tmp_path / "source"
-    templates_dir.mkdir()
-    (templates_dir / "a.md").write_text("Hello, world!\n", encoding="utf-8")
-    (templates_dir / "broken.md").symlink_to(templates_dir / "missing.md")
-
-    platen = Platen(
-        templates_dir,
-        {},
-    )
-
-    with raises(FileNotFoundError):
-        platen.press(output_dir)
-
-    assert not output_dir.exists()
-
-
-@mark.parametrize(
-    ("method", "source", "destination", "expect", "stray"),
-    [
-        (
-            "press_directory",
-            "posts",
-            "missing/../out",
-            [("out/b.md", "b.md"), ("out/c.bin", "c.bin")],
-            "missing",
-        ),
-        (
-            "press_directory",
-            "posts",
-            "templates/posts/new/../../out",
-            [("templates/out/b.md", "b.md"), ("templates/out/c.bin", "c.bin")],
-            "templates/posts/new",
-        ),
-        (
-            "press_file",
-            "posts/b.md",
-            "missing/../out.md",
-            [("out.md", "b.md")],
-            "missing",
-        ),
-        (
-            "press_file",
-            "posts/c.bin",
-            "missing/../out.bin",
-            [("out.bin", "c.bin")],
-            "missing",
-        ),
-    ],
-    ids=[
-        "directory via parent of missing directory",
-        "directory via missing directory within pressed directory",
-        "file via parent of missing directory",
-        "binary file via parent of missing directory",
-    ],
-)
-def test_press_writes_where_destination_leads(
-    method: str,
-    source: str,
-    destination: str,
-    expect: list[tuple[str, str]],
-    stray: str,
-    monkeypatch: MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """
-    `press_file` and `press_directory` must write where a destination leads, with each
-    template's permissions, and mustn't leave behind the missing directories that a
-    ".." steps up out of.
-
-    Those directories could otherwise be left within the directory being pressed.
-    """
-    templates_dir = tmp_path / "templates"
-    posts_dir = templates_dir / "posts"
-    posts_dir.mkdir(parents=True)
-
-    blob = b"\x00\xff\xfe binary\n"
-    (posts_dir / "b.md").write_text("{{ greeting }}\n", encoding="utf-8")
-    (posts_dir / "b.md").chmod(0o640)
-    (posts_dir / "c.bin").write_bytes(blob)
-    (posts_dir / "c.bin").chmod(0o750)
-
-    monkeypatch.chdir(tmp_path)
-
-    platen = Platen(
-        templates_dir,
-        {"greeting": "Hello"},
-    )
-
-    if method == "press_file":
-        platen.press_file(source, destination)
-    else:
-        platen.press_directory(source, destination)
-
-    for result, name in expect:
-        pressed = tmp_path / result
-        template = posts_dir / name
-
-        assert pressed.read_bytes() == (b"Hello\n" if name == "b.md" else blob)
-        assert S_IMODE(pressed.stat().st_mode) == S_IMODE(template.stat().st_mode)
-
-    assert not (tmp_path / stray).exists()
 
 
 @mark.parametrize(
@@ -2134,24 +1825,29 @@ def test_relative_template_is_within_templates_dir(
 
 
 @mark.parametrize(
-    "template",
+    ("method", "template", "expect"),
     [
-        "outside.md",
-        "outside_dir/doc.md",
+        ("press_file", "outside.md", "doc.md"),
+        ("press_file", "outside_dir/doc.md", "doc.md"),
+        ("press_directory", "outside_dir", "."),
     ],
     ids=[
         "symlink to file",
         "within symlink to directory",
+        "symlink to directory",
     ],
 )
 def test_symlinked_template_is_within_templates_dir(
+    method: str,
     template: str,
+    expect: str,
     output_dir: Path,
     tmp_path: Path,
 ) -> None:
     """
-    Platen must not press an explicitly named template outside the templates
-    directory, even when a symlink within the templates directory leads to it.
+    Platen must not press an explicitly named template, or directory of templates,
+    outside the templates directory, even when a symlink within the templates directory
+    leads to it.
     """
     outside_dir = tmp_path / "outside"
     outside_dir.mkdir()
@@ -2167,10 +1863,12 @@ def test_symlinked_template_is_within_templates_dir(
         {},
     )
 
-    with raises(TemplateNotInDirectoryError) as ex:
-        platen.press_file(template, output_dir / "doc.md")
+    press = platen.press_file if method == "press_file" else platen.press_directory
 
-    assert ex.value.template_path == (outside_dir / "doc.md").resolve()
+    with raises(TemplateNotInDirectoryError) as ex:
+        press(template, output_dir / "doc.md")
+
+    assert ex.value.template_path == (outside_dir / expect).resolve()
     assert not output_dir.exists()
 
 

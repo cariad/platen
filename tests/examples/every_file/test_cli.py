@@ -13,7 +13,7 @@ def test(
     `platen` on the command line must press every file in a templates directory.
 
     Every file within the templates directory must be pressed to the same relative path
-    in the output directory. Text files must be pressed and binary files must be copied.
+    in the output directory.
     """
     values = Path(__file__).parent / "values.yaml"
     exit_code = main([str(templates_dir), str(values), str(output_dir)])
