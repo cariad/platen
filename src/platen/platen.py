@@ -201,13 +201,10 @@ class Platen:
         # version: with `OSError` when it's identified.
         path = Path(realpath(self._templates_dir / named))
 
-        if path.is_relative_to(self._templates_dir):
-            return path.relative_to(self._templates_dir).as_posix()
-
         # `realpath` keeps the caller's spelling, which a case- or normalisation-
         # insensitive file system can store differently, so find the templates directory
-        # by identity before refusing the path. Nothing can be within a templates
-        # directory that doesn't exist.
+        # by identity rather than by name. Nothing can be within a templates directory
+        # that doesn't exist.
         if (found := identity(self._templates_dir)) is not None:
             for parent in (path, *path.parents):
                 if identity(parent) == found:
