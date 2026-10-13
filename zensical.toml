@@ -2,6 +2,7 @@
 copyright = "&copy; 2026 Cariad Eccleston"
 nav = [
   { "Get started" = "index.md" },
+  { "Contributing" = "contributing.md" },
 ]
 repo_name = "cariad/platen"
 repo_url = "https://github.com/cariad/platen"

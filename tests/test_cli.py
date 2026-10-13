@@ -1,6 +1,6 @@
 import os
 from errno import EIO
-from importlib.metadata import entry_points
+from importlib.metadata import PackageNotFoundError, entry_points, version
 from os import R_OK, W_OK, access, link, strerror
 from os.path import exists, isabs, realpath
 from pathlib import Path
@@ -10,6 +10,8 @@ from pytest import CaptureFixture, MonkeyPatch, fixture, mark, raises, skip
 
 from platen.cli import main
 from tests.snapshots import snapshot
+
+USAGE = "usage: platen [-h] [--version] template values output\n"
 
 
 def _assert_fails(
@@ -74,7 +76,7 @@ def test_help(capsys: CaptureFixture[str], monkeypatch: MonkeyPatch) -> None:
     assert ex.value.code == 0
 
     captured = capsys.readouterr()
-    assert captured.out.startswith("usage: platen [-h] template values output\n")
+    assert captured.out.startswith(USAGE)
     assert captured.err == ""
 
 
@@ -1074,7 +1076,7 @@ def test_refuses_wrong_number_of_arguments(
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.startswith("usage: platen [-h] template values output\n")
+    assert captured.err.startswith(USAGE)
     assert "\nplaten: error: " in captured.err
     assert snapshot(project) == before
 
@@ -1108,6 +1110,45 @@ def test_stops_quietly_when_interrupted(
 
     captured = capsys.readouterr()
     assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_version(capsys: CaptureFixture[str]) -> None:
+    """
+    `--version` must print the installed version to stdout and exit with 0, without
+    the other arguments.
+    """
+    with raises(SystemExit) as ex:
+        main(["--version"])
+
+    assert ex.value.code == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == f"platen {version('platen')}\n"
+    assert captured.err == ""
+
+
+def test_version_without_metadata(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """
+    `--version` must report an unknown version, rather than fail, when Platen's
+    package metadata isn't installed.
+    """
+
+    def missing(name: str) -> str:
+        raise PackageNotFoundError(name)
+
+    monkeypatch.setattr("platen.cli.version", missing)
+
+    with raises(SystemExit) as ex:
+        main(["--version"])
+
+    assert ex.value.code == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == "platen unknown\n"
     assert captured.err == ""
 
 

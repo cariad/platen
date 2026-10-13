@@ -1,6 +1,7 @@
 import sys
-from argparse import ArgumentParser
+from argparse import SUPPRESS, Action, ArgumentParser, Namespace
 from collections.abc import Mapping, Sequence
+from importlib.metadata import PackageNotFoundError, version
 from os import stat
 from os.path import isabs, split
 from stat import S_ISDIR
@@ -18,6 +19,29 @@ from .platen import Platen
 
 class _Error(PlatenError):
     """A failure that's already described for the command line."""
+
+
+class _VersionAction(Action):
+    """
+    Print Platen's version and exit, like argparse's own "version" action, but only
+    look the version up when it's asked for.
+    """
+
+    def __call__(
+        self,
+        parser: ArgumentParser,
+        namespace: Namespace,
+        values: str | Sequence[Any] | None,
+        option_string: str | None = None,
+    ) -> None:
+        try:
+            installed = version("platen")
+        except PackageNotFoundError:
+            # Platen can run without its package's metadata, like from a source tree.
+            installed = "unknown"
+
+        print(f"{parser.prog} {installed}")
+        parser.exit()
 
 
 def _describe(error: Exception) -> str:
@@ -243,7 +267,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         0 on success, 1 on failure, or 130 when interrupted.
 
     Raises:
-        SystemExit: When the arguments are wrong, with 2, or help is asked for, with 0.
+        SystemExit: When the arguments are wrong (with 2), or help/version is asked for
+            (with 0).
     """
     parser = ArgumentParser(
         description="Press structured data into documents.",
@@ -270,6 +295,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "path to the file to press to, or the directory to press into when the "
             "template is a directory"
         ),
+    )
+
+    parser.add_argument(
+        "--version",
+        action=_VersionAction,
+        default=SUPPRESS,
+        help="show program's version number and exit",
+        nargs=0,
     )
 
     arguments = parser.parse_args(argv)
