@@ -372,9 +372,7 @@ class Platen:
         and https://cariad.github.io/mosey/binary-files/
 
         The `.platenignore` files above the directory, up to the source templates
-        directory, still apply. The rest of the source templates directory is walked
-        only to find the templates to protect, so keep templates in a dedicated
-        directory, rather than, say, the root of a project, so that presses stay quick.
+        directory, still apply.
 
         A directory named through a symlink is pressed as the directory that it leads
         to. Symlinks within the directory are pressed like files, to their own paths
@@ -429,11 +427,7 @@ class Platen:
         name = self._spelled(self._name(directory))
         path = self._templates_dir / name
 
-        # Walk from the templates directory, so that the `.platenignore` files above the
-        # requested directory still apply. Mosey checks that the directory is one as
-        # soon as the walk starts, so start it before the destination is resolved, so
-        # that a missing working directory can't hide the directory's error.
-        walk = self._walker.walk(
+        self._walker.check_walk_can_start(
             self._templates_dir,
             start=name,
         )
@@ -447,16 +441,30 @@ class Platen:
         if relative_within(destination_path, path) is not None:
             raise DestinationWithinDirectoryError(path, destination_path)
 
+        # Guard every template in the templates directory, and not only those being
+        # pressed, so that a press into the templates directory can't overwrite a
+        # template that a later one references.
+        #
+        # That walks the whole templates directory anyway, so take the templates to
+        # press from the same walk, rather than walking the requested directory again. A
+        # walk yields exactly what a walk that starts in the requested directory would
+        # within it, so long as the directory is spelled exactly as the walk lists it,
+        # which `_spelled` sees to: https://cariad.github.io/mosey/starting-directories/
+        #
         # Finish the walk before pressing anything. Mosey lists each directory as it
         # reaches it, so a result written into the templates directory, like through a
         # symlink within the destination, could otherwise be walked and pressed too.
+        templates = [
+            step.relative_as_posix for step in self._walker.walk(self._templates_dir)
+        ]
+
         jobs = [
             (
-                step.relative_as_posix,
-                destination_path
-                / PurePosixPath(step.relative_as_posix).relative_to(name),
+                template,
+                destination_path / PurePosixPath(template).relative_to(name),
             )
-            for step in walk
+            for template in templates
+            if PurePosixPath(template).parent.is_relative_to(name)
         ]
 
         if not jobs:
@@ -466,18 +474,6 @@ class Platen:
             )
 
             return 0
-
-        # Guard every template in the templates directory, and not only those being
-        # pressed, so that a press into the templates directory can't overwrite a
-        # template that a later one references. A press of the whole templates
-        # directory has already walked them all.
-        if name == ".":
-            templates = [rel for rel, _ in jobs]
-        else:
-            templates = [
-                step.relative_as_posix
-                for step in self._walker.walk(self._templates_dir)
-            ]
 
         self._press(
             jobs,
