@@ -174,6 +174,32 @@ def test_press_directory_presses_directory_named_through_symlink(
     assert pressed == expect
 
 
+def test_press_directory_presses_directory_named_through_symlink_in_different_case(
+    output_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """
+    `press_directory` must press the directory that a symlink leads to when the
+    symlink's target is spelled in a different case from how the directory is stored,
+    on a file system that's insensitive to case, like macOS's default APFS.
+    """
+    templates_dir = tmp_path / "templates"
+    (templates_dir / "posts").mkdir(parents=True)
+    (templates_dir / "posts" / "a.md").write_text("Hello\n", encoding="utf-8")
+    (templates_dir / "latest").symlink_to("Posts", target_is_directory=True)
+
+    if not exists(templates_dir / "Posts"):
+        skip("'Posts' names a different directory on this file system")
+
+    platen = Platen(
+        templates_dir,
+        {},
+    )
+
+    assert platen.press_directory("latest", output_dir) == 1
+    assert (output_dir / "a.md").read_text(encoding="utf-8") == "Hello\n"
+
+
 def test_press_directory_presses_to_destination(
     output_dir: Path,
     tmp_path: Path,

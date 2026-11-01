@@ -6,7 +6,7 @@ In a printing press, the *platen* presses paper against inked type.
 
 ## Requirements
 
-- Python 3.11 or later.
+- Python 3.14 or later.
 
 ## Installation
 
