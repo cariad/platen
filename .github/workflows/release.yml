@@ -28,7 +28,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
 
-      - run: SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PLATEN="${GITHUB_REF_NAME#v}" uv build
+      - run: uv build
 
       # Fail unless the built version is exactly the tag's. This also rejects tags
       # that aren't canonical versions, like v1.02.0 (built as 1.2.0), which the tag

@@ -233,7 +233,7 @@ Missing directories are created, existing files are overwritten, and nothing is 
 
 `press_directory` presses a directory's *contents* into the destination, so `press_directory("posts", "build")` writes `posts/hello.md` to `build/hello.md`. Pass `"build/posts"` to keep the subdirectory.
 
-Keep the same templates directory and name the subdirectory, so that templates can still `include` and `extend` templates elsewhere in the tree, and `.platenignore` files above the subdirectory still apply. Platen walks the whole templates directory to find them, so keep your templates in a directory of their own, rather than, say, the root of your project.
+Keep the same templates directory and name the subdirectory, so that templates can still `include` and `extend` templates elsewhere in the tree, and `.platenignore` files above the subdirectory still apply. Platen walks the whole templates directory to find the templates to protect, so keep your templates in a directory of their own, rather than, say, the root of your project.
 
 You can name the directory through a symlink, like `press_directory("latest", "build")`, and Platen presses the directory that it leads to. But within a walk, symlinks are pressed like files, and Platen never walks into them, so a symlink to a directory stops the press. To keep one out of a walk, list it in a `.platenignore` file like a file, such as `linked`. A pattern for a directory, such as `linked/`, doesn't match a symlink.
 

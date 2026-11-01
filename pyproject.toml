@@ -33,7 +33,8 @@ classifiers = [
 ]
 dependencies = [
   "jinja2>=3.1.6,<4",
-  "mosey>=0.4.0,<0.5",
+  "mosey>=0.8.0,<0.9",
+  "rootle>=1.1.0,<2",
   "ruamel-yaml>=0.19.1,<0.20",
 ]
 description = "Press structured data into documents"
@@ -43,7 +44,7 @@ dynamic = [
 license = "MIT"
 name = "platen"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 
 [project.scripts]
 platen = "platen.cli:main"
@@ -67,14 +68,9 @@ source = [
 [tool.hatch.version]
 # Derive the version from git tags.
 #
-# `.github/workflows/release.yml` pins it to the release tag with
-# `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PLATEN`, which setuptools-scm only reads when it's
-# given `dist_name`.
-#
 # Source trees without git metadata, like GitHub's source archives, fall back to 0.0.0
 # rather than failing.
 fallback-version = "0.0.0"
-raw-options = { dist_name = "platen" }
 source = "vcs"
 
 [tool.pyright]
@@ -82,7 +78,7 @@ include = [
   "src",
   "tests",
 ]
-pythonVersion = "3.11"
+pythonVersion = "3.14"
 typeCheckingMode = "strict"
 
 [tool.pytest.ini_options]
@@ -138,4 +134,4 @@ cache-keys = [
   { file = "pyproject.toml" },
   { git = { commit = true, tags = true } },
 ]
-required-version = "~=0.12.10"
+required-version = "~=0.13.5"

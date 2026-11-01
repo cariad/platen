@@ -1,12 +1,9 @@
 from collections.abc import Callable, Iterable, Mapping
-from errno import ENOTDIR
-from functools import cache
 from logging import getLogger
-from os import PathLike, stat, strerror
-from os.path import dirname, exists, realpath
-from pathlib import Path
+from os import PathLike, scandir, stat
+from os.path import samestat
+from pathlib import Path, PurePosixPath
 from shutil import copymode
-from stat import S_ISDIR
 from typing import Any
 
 from jinja2 import (
@@ -19,6 +16,8 @@ from jinja2 import (
 )
 from jinja2.loaders import split_template_path
 from mosey import Mosey
+from rootle import identity, relative_within, resolve
+from rootle.types import Identity
 
 from .exceptions import (
     DestinationIsProtectedError,
@@ -27,7 +26,6 @@ from .exceptions import (
     TemplateNotInDirectoryError,
     TemplateNotPressableError,
 )
-from .files import identity, is_within
 
 IGNORE_FILENAME = ".platenignore"
 """
@@ -76,7 +74,7 @@ class _Loader(FileSystemLoader):
             raise TemplateNotPressableError(path, reason) from error
 
 
-def _identities(paths: Iterable[Path]) -> dict[tuple[int, int], Path]:
+def _identities(paths: Iterable[Path]) -> dict[Identity, Path]:
     """
     Identify the files at paths.
 
@@ -84,10 +82,10 @@ def _identities(paths: Iterable[Path]) -> dict[tuple[int, int], Path]:
         paths: Paths to the files to identify.
 
     Returns:
-        Each path that a file exists at, keyed by the file's identity (see `identity`).
-        Where paths share an identity, the first is kept.
+        Each path that a file exists at, keyed by the file's identity (see
+        `rootle.identity`). Where paths share an identity, the first is kept.
     """
-    identities: dict[tuple[int, int], Path] = {}
+    identities: dict[Identity, Path] = {}
 
     for path in paths:
         # A file that doesn't exist can't be overwritten.
@@ -115,8 +113,8 @@ class Platen:
 
     - Jinja resolves referenced templates (`extends`, `include`, `import`, etc) relative
       to it.
-    - Pressing a directory walks it from `templates_dir` down, so that the
-      `.platenignore` files above that directory still apply.
+    - Pressing a directory applies the `.platenignore` files from `templates_dir`
+      down, so that those above that directory still apply.
     - Every template that's named explicitly must be within it.
 
     Every file is pressed as a template, so every template must be UTF-8. Walks skip
@@ -153,7 +151,7 @@ class Platen:
         *,
         protect: Iterable[PathLike[str] | str] = (),
     ) -> None:
-        self._templates_dir = Path(realpath(templates_dir))
+        self._templates_dir = Path(templates_dir).resolve()
         self._values = values
         # Anchor relative paths now, like the templates directory, so that changing the
         # working directory before a press can't change which files are protected. They
@@ -196,21 +194,12 @@ class Platen:
             TemplateNotInDirectoryError: When `named` leads outside the source templates
                 directory.
         """
-        # `Path.resolve()` raises `RuntimeError` for a loop of symlinks on Python 3.11
-        # and 3.12, but `realpath` never raises, so a loop fails the same way on every
-        # version: with `OSError` when it's identified.
-        path = Path(realpath(self._templates_dir / named))
+        path = resolve(self._templates_dir / named)
 
-        # `realpath` keeps the caller's spelling, which a case- or normalisation-
-        # insensitive file system can store differently, so find the templates directory
-        # by identity rather than by name. Nothing can be within a templates directory
-        # that doesn't exist.
-        if (found := identity(self._templates_dir)) is not None:
-            for parent in (path, *path.parents):
-                if identity(parent) == found:
-                    return path.relative_to(parent).as_posix()
+        if (relative := relative_within(path, self._templates_dir)) is None:
+            raise TemplateNotInDirectoryError(path, self._templates_dir)
 
-        raise TemplateNotInDirectoryError(path, self._templates_dir)
+        return relative.as_posix()
 
     def _press(
         self,
@@ -269,6 +258,47 @@ class Platen:
 
             log.info("Pressed %s to %s", name, destination)
 
+    def _spelled(self, name: str) -> str:
+        """
+        Spell a directory's name the way the file system lists it.
+
+        `_name` keeps the caller's spelling, or a symlink's, which a case- or
+        normalisation-insensitive file system can store differently, but walks only
+        start in a directory that's spelled exactly. So each name is found in its
+        directory's listing by identity rather than by name.
+
+        Args:
+            name: POSIX-style path to the directory, relative to the source templates
+                directory, as `_name` names it.
+
+        Returns:
+            The path, with each name spelled as the file system lists it. A name that
+            can't be found is kept as it was given, so that the walk names it in its
+            error.
+        """
+        parts = PurePosixPath(name).parts
+        parent = self._templates_dir
+
+        for index, part in enumerate(parts):
+            try:
+                wanted = stat(parent / part)
+
+                with scandir(parent) as entries:
+                    listed = next(
+                        entry.name
+                        for entry in entries
+                        if not entry.is_symlink() and samestat(entry.stat(), wanted)
+                    )
+
+            except OSError, StopIteration:
+                # Leave the rest to the walk, which raises its own errors.
+                break
+
+            parts = (*parts[:index], listed, *parts[index + 1 :])
+            parent = parent / listed
+
+        return PurePosixPath(*parts).as_posix() if parts else "."
+
     def _template(self, name: str) -> Template:
         """
         Load a template to press.
@@ -288,18 +318,16 @@ class Platen:
         """
         try:
             return self._env.get_template(name)
+
         except TemplateNotFound:
             # Jinja only opens regular files, so it never blocks on a FIFO or reads a
             # device forever. But it says that anything else isn't found, even a
             # directory that's plainly there. Only the template being pressed is named
             # here: a referenced template is left to Jinja, so that `ignore missing` and
             # lists of templates still skip one that isn't a regular file.
-            #
-            # `Path.exists()` raises for a path that permissions hide on Python 3.11 to
-            # 3.13, but `exists` never raises.
             path = self._templates_dir / name
 
-            if not exists(path):
+            if not path.exists():
                 raise
 
             raise TemplateNotPressableError(path, "it isn't a regular file") from None
@@ -343,10 +371,8 @@ class Platen:
         documentation for the exact rules: https://cariad.github.io/mosey/ignore-files/
         and https://cariad.github.io/mosey/binary-files/
 
-        Pressing a directory walks the whole source templates directory, so that the
-        `.platenignore` files above the directory still apply. Keep templates in a
-        dedicated directory, rather than, say, the root of a project, so that walks
-        stay quick.
+        The `.platenignore` files above the directory, up to the source templates
+        directory, still apply.
 
         A directory named through a symlink is pressed as the directory that it leads
         to. Symlinks within the directory are pressed like files, to their own paths
@@ -374,7 +400,8 @@ class Platen:
                 protected file, by any name.
 
             DestinationIsTemplateError: When a destination is the same file as any
-                template that the walk finds, even outside `directory`, by any name.
+                template that a walk of the source templates directory finds, even
+                outside `directory`, by any name.
 
             DestinationWithinDirectoryError: When `destination`, followed through any
                 symlinks along it, is `directory` or within it. Symlinks within the
@@ -397,13 +424,13 @@ class Platen:
             jinja2.TemplateError: When a template can't be found or rendered, including
                 when a template that it references isn't a regular file.
         """
-        name = self._name(directory)
+        name = self._spelled(self._name(directory))
         path = self._templates_dir / name
 
-        # `stat` raises the operating system's own error when the directory doesn't
-        # exist or can't be reached, but it's happy with a file.
-        if not S_ISDIR(stat(path).st_mode):
-            raise NotADirectoryError(ENOTDIR, strerror(ENOTDIR), str(path))
+        self._walker.check_walk_can_start(
+            self._templates_dir,
+            start=name,
+        )
 
         destination_path = Path(destination)
 
@@ -411,37 +438,34 @@ class Platen:
         # press would read the results as templates. This is stricter than it needs to
         # be when `.platenignore` files ignore the destination, but Mosey can't tell us
         # that yet: https://github.com/cariad/mosey/issues/44
-        if is_within(destination_path, path):
+        if relative_within(destination_path, path) is not None:
             raise DestinationWithinDirectoryError(path, destination_path)
 
-        # Mosey never reads ignore-files above the directory it walks, so walk the whole
-        # templates directory and keep only the files within the requested directory.
-        # That way, the `.platenignore` files above the requested directory still apply.
+        # Guard every template in the templates directory, and not only those being
+        # pressed, so that a press into the templates directory can't overwrite a
+        # template that a later one references.
+        #
+        # That walks the whole templates directory anyway, so take the templates to
+        # press from the same walk, rather than walking the requested directory again. A
+        # walk yields exactly what a walk that starts in the requested directory would
+        # within it, so long as the directory is spelled exactly as the walk lists it,
+        # which `_spelled` sees to: https://cariad.github.io/mosey/starting-directories/
         #
         # Finish the walk before pressing anything. Mosey lists each directory as it
         # reaches it, so a result written into the templates directory, like through a
         # symlink within the destination, could otherwise be walked and pressed too.
-        walk = self._walker.walk(self._templates_dir)
-        walked = [step.relative_as_posix for step in walk]
-        found = identity(path)
+        templates = [
+            step.relative_as_posix for step in self._walker.walk(self._templates_dir)
+        ]
 
-        @cache
-        def spelled(rel_dir: str) -> str | None:
-            # Find the directory by identity rather than by name, because `realpath`
-            # keeps the caller's spelling, which a case- or normalisation-insensitive
-            # file system can store differently. Jobs share most of their parents, so
-            # check each parent once.
-            if identity(self._templates_dir / rel_dir) == found:
-                return rel_dir
-
-            return spelled(dirname(rel_dir)) if rel_dir else None
-
-        jobs: list[tuple[str, Path]] = []
-
-        for rel in walked:
-            if (within := spelled(dirname(rel))) is not None:
-                prefix = within + "/" if within else ""
-                jobs.append((rel, destination_path / rel.removeprefix(prefix)))
+        jobs = [
+            (
+                template,
+                destination_path / PurePosixPath(template).relative_to(name),
+            )
+            for template in templates
+            if PurePosixPath(template).parent.is_relative_to(name)
+        ]
 
         if not jobs:
             log.warning(
@@ -451,12 +475,9 @@ class Platen:
 
             return 0
 
-        # Guard every template that the walk found, and not only those being pressed,
-        # so that a press into the templates directory can't overwrite a template that
-        # a later one references.
         self._press(
             jobs,
-            walked,
+            templates,
         )
 
         return len(jobs)
