@@ -367,11 +367,13 @@ def test_press_directory_raises_when_destination_is_template_via_missing_dir(
     ("directory", "expect", "expect_path"),
     [
         ("doc.md", NotADirectoryError, "doc.md"),
+        ("pipe", NotADirectoryError, "pipe"),
         ("broken", FileNotFoundError, "nowhere"),
         ("missing", FileNotFoundError, "missing"),
     ],
     ids=[
         "file",
+        "fifo",
         "broken symlink",
         "missing",
     ],
@@ -395,6 +397,12 @@ def test_press_directory_raises_when_directory_is_not_directory(
     templates_dir.mkdir()
     (templates_dir / "doc.md").write_text("Hello, world!\n", encoding="utf-8")
     (templates_dir / "broken").symlink_to(templates_dir / "nowhere")
+
+    if directory == "pipe":
+        if not hasattr(os, "mkfifo"):
+            skip("This platform doesn't have FIFOs")
+
+        os.mkfifo(templates_dir / "pipe")
 
     platen = Platen(
         templates_dir,
