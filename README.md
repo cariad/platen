@@ -21,8 +21,16 @@ pipx install platen
 ## Usage
 
 ```text
-platen TEMPLATE VALUES OUTPUT
+platen --template FILE \
+       --values   FILE \
+       --out      FILE
+
+platen --templates DIRECTORY \
+       --values    FILE      \
+       --out       DIRECTORY
 ```
+
+`--template` and `--templates` are the same option, so either one can name a file or a directory.
 
 For example, say you have values in `values.yaml`:
 
@@ -39,7 +47,7 @@ And a [Jinja](https://jinja.palletsprojects.com/en/stable/templates/) template, 
 Press the values into the template:
 
 ```bash
-platen hello.md values.yaml build/hello.md
+platen --template hello.md --values values.yaml --out build/hello.md
 ```
 
 Platen creates `build/hello.md`:
@@ -48,10 +56,10 @@ Platen creates `build/hello.md`:
 # Hello, Bob!
 ```
 
-To press every template in a directory, name that directory and the directory to press into:
+To press every template in a directory, name that directory with `--templates` and the directory to press into with `--out`:
 
 ```bash
-platen templates values.yaml build
+platen --templates templates --values values.yaml --out build
 ```
 
 ## Contributing

@@ -11,7 +11,7 @@ from pytest import CaptureFixture, MonkeyPatch, fixture, mark, raises, skip
 from platen.cli import main
 from tests.snapshots import snapshot
 
-USAGE = "usage: platen [-h] [--version] template values output\n"
+USAGE = "usage: platen [-h] [--version] --template PATH --values PATH --out PATH\n"
 
 
 def _assert_fails(
@@ -29,7 +29,9 @@ def _assert_fails(
     """
     before = snapshot(directory)
 
-    assert main(arguments) == 1
+    exit_code = main(arguments)
+
+    assert exit_code == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -66,17 +68,28 @@ def test_console_script_runs_main() -> None:
 
 
 def test_help(capsys: CaptureFixture[str], monkeypatch: MonkeyPatch) -> None:
-    """`--help` must print usage to stdout and exit with 0."""
+    """
+    `--help` must print usage to stdout, naming both of the template's options, and
+    exit with 0.
+    """
+    # argparse wraps its usage to the terminal's width, and `USAGE` is one line.
+    monkeypatch.setenv("COLUMNS", "80")
+
     # Python 3.14's argparse colours its output when the environment asks for colour.
     monkeypatch.setenv("PYTHON_COLORS", "0")
 
     with raises(SystemExit) as ex:
-        main(["--help"])
+        main(
+            [
+                "--help",
+            ],
+        )
 
     assert ex.value.code == 0
 
     captured = capsys.readouterr()
     assert captured.out.startswith(USAGE)
+    assert "\n  --template, --templates PATH\n" in captured.out
     assert captured.err == ""
 
 
@@ -105,9 +118,9 @@ def test_presses_directory(
     project: Path,
 ) -> None:
     """
-    `platen templates values.yaml build` must press every file within the directory to
-    the same path within the output, however the directory is named, print nothing, and
-    exit with 0.
+    `platen --templates templates --values values.yaml --out build` must press every
+    file within the directory to the same path within the output, however the
+    directory is named, print nothing, and exit with 0.
 
     Templates that are included must be found relative to the directory, wherever the
     template that includes them is, and be pressed too.
@@ -128,7 +141,18 @@ def test_presses_directory(
 
     (project / "link").symlink_to("templates")
 
-    assert main([template.format(cwd=project), "values.yaml", "build"]) == 0
+    exit_code = main(
+        [
+            "--templates",
+            template.format(cwd=project),
+            "--values",
+            "values.yaml",
+            "--out",
+            "build",
+        ],
+    )
+
+    assert exit_code == 0
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -154,7 +178,18 @@ def test_presses_empty_values(capsys: CaptureFixture[str], project: Path) -> Non
     (project / "doc.template").write_text("Hello, world!\n", encoding="utf-8")
     (project / "empty.yaml").write_text("", encoding="utf-8")
 
-    assert main(["doc.template", "empty.yaml", "doc.md"]) == 0
+    exit_code = main(
+        [
+            "--template",
+            "doc.template",
+            "--values",
+            "empty.yaml",
+            "--out",
+            "doc.md",
+        ],
+    )
+
+    assert exit_code == 0
     assert capsys.readouterr().err == ""
     assert (project / "doc.md").read_text(encoding="utf-8") == "Hello, world!\n"
 
@@ -164,11 +199,22 @@ def test_presses_readme_next_to_template(
     project: Path,
 ) -> None:
     """
-    `platen README.template values.yaml README.md` must press the README next to its
-    template, resolving its include from the template's directory, print nothing, and
-    exit with 0.
+    `platen --template README.template --values values.yaml --out README.md` must press
+    the README next to its template, resolving its include from the template's
+    directory, print nothing, and exit with 0.
     """
-    assert main(["README.template", "values.yaml", "README.md"]) == 0
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+        ],
+    )
+
+    assert exit_code == 0
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -185,7 +231,18 @@ def test_presses_symlink_to_template_within_directory(
     """A template that's a symlink to a file in its own directory must be pressed."""
     (project / "link.template").symlink_to("README.template")
 
-    assert main(["link.template", "values.yaml", "README.md"]) == 0
+    exit_code = main(
+        [
+            "--template",
+            "link.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+        ],
+    )
+
+    assert exit_code == 0
     assert capsys.readouterr().err == ""
 
     pressed = (project / "README.md").read_text(encoding="utf-8")
@@ -205,7 +262,18 @@ def test_presses_template_in_subdirectory(
     (docs / "page.template").write_text('{% include "_part.txt" %}', encoding="utf-8")
     (docs / "_part.txt").write_text("Hello from {{ name }}\n", encoding="utf-8")
 
-    assert main(["docs/page.template", "values.yaml", "build/site/index.md"]) == 0
+    exit_code = main(
+        [
+            "--template",
+            "docs/page.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "build/site/index.md",
+        ],
+    )
+
+    assert exit_code == 0
     assert capsys.readouterr().err == ""
 
     pressed = (project / "build" / "site" / "index.md").read_text(encoding="utf-8")
@@ -256,7 +324,18 @@ def test_presses_values_file_within_directory(
     if ignore is not None:
         (templates / ".platenignore").write_text(ignore, encoding="utf-8")
 
-    assert main(["templates", "templates/values.yaml", "build"]) == 0
+    exit_code = main(
+        [
+            "--templates",
+            "templates",
+            "--values",
+            "templates/values.yaml",
+            "--out",
+            "build",
+        ],
+    )
+
+    assert exit_code == 0
     assert capsys.readouterr().err == ""
 
     build = project / "build"
@@ -281,7 +360,18 @@ def test_presses_values_that_reuse_anchor(
         encoding="utf-8",
     )
 
-    assert main(["README.template", "values.yaml", "README.md"]) == 0
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+        ],
+    )
+
+    assert exit_code == 0
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -289,6 +379,69 @@ def test_presses_values_that_reuse_anchor(
 
     pressed = (project / "README.md").read_text(encoding="utf-8")
     assert pressed == "# a\n\nBuild: passing\n"
+
+
+@mark.parametrize(
+    ("option", "template", "output"),
+    [
+        ("--template", "docs", "build"),
+        ("--templates", "docs/page.md", "build/page.md"),
+    ],
+    ids=[
+        "template directory",
+        "templates file",
+    ],
+)
+def test_presses_with_either_template_option(
+    option: str,
+    template: str,
+    output: str,
+    capsys: CaptureFixture[str],
+    project: Path,
+) -> None:
+    """`--template` must also press a directory, and `--templates` a file."""
+    (project / "docs").mkdir()
+    (project / "docs" / "page.md").write_text("# {{ name }}\n", encoding="utf-8")
+
+    exit_code = main(
+        [
+            option,
+            template,
+            "--values",
+            "values.yaml",
+            "--out",
+            output,
+        ],
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().err == ""
+
+    pressed = (project / "build" / "page.md").read_text(encoding="utf-8")
+    assert pressed == "# platen\n"
+
+
+def test_presses_with_options_in_any_order(
+    capsys: CaptureFixture[str],
+    project: Path,
+) -> None:
+    """The options must press the same in any order."""
+    exit_code = main(
+        [
+            "--out",
+            "README.md",
+            "--values",
+            "values.yaml",
+            "--template",
+            "README.template",
+        ],
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().err == ""
+
+    pressed = (project / "README.md").read_text(encoding="utf-8")
+    assert pressed == "# platen\n\nBuild: passing\n"
 
 
 def test_refuses_directory_destination_that_is_template(
@@ -309,7 +462,14 @@ def test_refuses_directory_destination_that_is_template(
     _assert_fails(
         capsys,
         project,
-        ["templates", "values.yaml", "build"],
+        [
+            "--templates",
+            "templates",
+            "--values",
+            "values.yaml",
+            "--out",
+            "build",
+        ],
         "Destination 'build/a.md' is the same file as template "
         f"'{realpath(templates / 'a.md')}'",
     )
@@ -333,7 +493,14 @@ def test_refuses_directory_destination_that_is_values_file(
     _assert_fails(
         capsys,
         project,
-        ["templates", "values.yaml", "build"],
+        [
+            "--templates",
+            "templates",
+            "--values",
+            "values.yaml",
+            "--out",
+            "build",
+        ],
         "Destination 'build/a.md' is the same file as protected file "
         f"'{realpath(project / 'values.yaml')}'",
     )
@@ -354,7 +521,14 @@ def test_refuses_directory_output_within_directory(
     _assert_fails(
         capsys,
         project,
-        ["templates", "values.yaml", "templates/build"],
+        [
+            "--templates",
+            "templates",
+            "--values",
+            "values.yaml",
+            "--out",
+            "templates/build",
+        ],
         f"Destination 'templates/build' is within '{realpath(templates)}', the "
         "directory being pressed",
     )
@@ -374,7 +548,18 @@ def test_refuses_directory_template_after_pressing_others(
     (templates / "b.md").write_text("{{ missing }}\n", encoding="utf-8")
 
     # `_assert_fails` would see `a.md`'s result as a change.
-    assert main(["templates", "values.yaml", "build"]) == 1
+    exit_code = main(
+        [
+            "--templates",
+            "templates",
+            "--values",
+            "values.yaml",
+            "--out",
+            "build",
+        ],
+    )
+
+    assert exit_code == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -407,7 +592,18 @@ def test_refuses_directory_that_cannot_be_read(
             skip("Permissions don't stop this user from reading directories")
 
         # `_assert_fails` can't snapshot a directory that can't be read.
-        assert main(["templates", "values.yaml", "build"]) == 1
+        exit_code = main(
+            [
+                "--templates",
+                "templates",
+                "--values",
+                "values.yaml",
+                "--out",
+                "build",
+            ],
+        )
+
+        assert exit_code == 1
 
         captured = capsys.readouterr()
         assert captured.out == ""
@@ -479,7 +675,14 @@ def test_refuses_directory_with_symlink_that_cannot_be_pressed(
     _assert_fails(
         capsys,
         project,
-        ["templates", "values.yaml", "build"],
+        [
+            "--templates",
+            "templates",
+            "--values",
+            "values.yaml",
+            "--out",
+            "build",
+        ],
         message.format(templates=realpath(templates)),
     )
 
@@ -503,7 +706,14 @@ def test_refuses_output_in_directory_that_cannot_be_written(
         _assert_fails(
             capsys,
             project,
-            ["README.template", "values.yaml", "ro/out.md"],
+            [
+                "--template",
+                "README.template",
+                "--values",
+                "values.yaml",
+                "--out",
+                "ro/out.md",
+            ],
             "Permission denied: 'ro/out.md'",
         )
     finally:
@@ -520,7 +730,14 @@ def test_refuses_output_that_cannot_be_written(
     _assert_fails(
         capsys,
         project,
-        ["README.template", "values.yaml", "existing"],
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "existing",
+        ],
         "Is a directory: 'existing'",
     )
 
@@ -564,7 +781,14 @@ def test_refuses_output_that_fails_to_write(
     _assert_fails(
         capsys,
         project,
-        ["README.template", "values.yaml", "out.md"],
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "out.md",
+        ],
         message,
     )
 
@@ -580,7 +804,14 @@ def test_refuses_output_that_is_template(
     _assert_fails(
         capsys,
         project,
-        ["README.template", "values.yaml", "README.template"],
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.template",
+        ],
         "Destination 'README.template' is the same file as template "
         f"'{realpath(project / 'README.template')}'",
     )
@@ -598,7 +829,14 @@ def test_refuses_output_that_is_values_file(
     _assert_fails(
         capsys,
         project,
-        ["README.template", "values.yaml", "values.yaml"],
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "values.yaml",
+        ],
         "Destination 'values.yaml' is the same file as protected file "
         f"'{realpath(project / 'values.yaml')}'",
     )
@@ -621,7 +859,14 @@ def test_refuses_paths_in_deleted_working_directory(
     _assert_fails(
         capsys,
         project,
-        ["README.template", "values.yaml", "README.md"],
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+        ],
         "No such file or directory: 'README.template'",
     )
 
@@ -643,7 +888,17 @@ def test_refuses_template_error_without_file(
 
     monkeypatch.setattr("platen.cli.Platen.press_file", press_file)
     _assert_fails(
-        capsys, project, ["README.template", "values.yaml", "out.md"], "Broken"
+        capsys,
+        project,
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "out.md",
+        ],
+        "Broken",
     )
 
 
@@ -677,7 +932,14 @@ def test_refuses_template_that_cannot_be_found(
     _assert_fails(
         capsys,
         project,
-        [template, "values.yaml", "out.md"],
+        [
+            "--template",
+            template,
+            "--values",
+            "values.yaml",
+            "--out",
+            "out.md",
+        ],
         message,
     )
 
@@ -695,7 +957,18 @@ def test_refuses_template_that_cannot_be_read(
             skip("Permissions don't stop this user from reading files")
 
         # `_assert_fails` can't snapshot a file that can't be read.
-        assert main(["README.template", "values.yaml", "README.md"]) == 1
+        exit_code = main(
+            [
+                "--template",
+                "README.template",
+                "--values",
+                "values.yaml",
+                "--out",
+                "README.md",
+            ],
+        )
+
+        assert exit_code == 1
 
         captured = capsys.readouterr()
         assert captured.out == ""
@@ -786,7 +1059,14 @@ def test_refuses_template_that_cannot_be_rendered(
     _assert_fails(
         capsys,
         project,
-        ["docs/page.template", "values.yaml", "out.md"],
+        [
+            "--template",
+            "docs/page.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "out.md",
+        ],
         message.format(docs=realpath(docs)),
     )
 
@@ -808,7 +1088,14 @@ def test_refuses_template_that_is_not_a_file_or_directory(
     _assert_fails(
         capsys,
         project,
-        ["fifo", "values.yaml", "out.md"],
+        [
+            "--template",
+            "fifo",
+            "--values",
+            "values.yaml",
+            "--out",
+            "out.md",
+        ],
         f"Template '{realpath(project / 'fifo')}' can't be pressed: it isn't a "
         "regular file",
     )
@@ -825,7 +1112,14 @@ def test_refuses_template_that_is_not_utf8(
     _assert_fails(
         capsys,
         project,
-        ["docs/_legacy.txt", "values.yaml", "out.md"],
+        [
+            "--template",
+            "docs/_legacy.txt",
+            "--values",
+            "values.yaml",
+            "--out",
+            "out.md",
+        ],
         f"Template '{realpath(project / 'docs' / '_legacy.txt')}' can't be pressed: "
         "it isn't valid UTF-8 (invalid continuation byte at byte 3)",
     )
@@ -846,7 +1140,14 @@ def test_refuses_template_that_leads_outside_directory(
     _assert_fails(
         capsys,
         project,
-        ["docs/link.template", "values.yaml", "out.md"],
+        [
+            "--template",
+            "docs/link.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "out.md",
+        ],
         f"Template '{realpath(project / 'README.template')}' is not within the "
         f"templates directory '{realpath(project / 'docs')}'",
     )
@@ -885,7 +1186,14 @@ def test_refuses_values_named_with_line_break(
     _assert_fails(
         capsys,
         project,
-        ["README.template", "it's\nvalues.yaml", "README.md"],
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "it's\nvalues.yaml",
+            "--out",
+            "README.md",
+        ],
         message,
     )
 
@@ -916,7 +1224,14 @@ def test_refuses_values_that_are_not_mapping(
     _assert_fails(
         capsys,
         project,
-        ["README.template", "values.yaml", "README.md"],
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+        ],
         "Values file 'values.yaml' must hold a mapping of names to values",
     )
 
@@ -974,7 +1289,14 @@ def test_refuses_values_that_are_not_valid(
     _assert_fails(
         capsys,
         project,
-        ["README.template", "values.yaml", "README.md"],
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+        ],
         message,
     )
 
@@ -1007,7 +1329,14 @@ def test_refuses_values_that_cannot_be_read(
     _assert_fails(
         capsys,
         project,
-        ["README.template", values.format(cwd=project), "README.md"],
+        [
+            "--template",
+            "README.template",
+            "--values",
+            values.format(cwd=project),
+            "--out",
+            "README.md",
+        ],
         message.format(cwd=project),
     )
 
@@ -1035,28 +1364,112 @@ def test_refuses_values_with_keys_that_are_not_strings(
     _assert_fails(
         capsys,
         project,
-        ["README.template", "values.yaml", "README.md"],
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+        ],
         f"Values file 'values.yaml' has a key that isn't a string: {key}",
     )
 
 
 @mark.parametrize(
-    "arguments",
+    ("arguments", "message"),
     [
-        [],
-        ["README.template"],
-        ["README.template", "values.yaml"],
-        ["README.template", "values.yaml", "README.md", "extra"],
-    ],
-    ids=[
-        "none",
-        "one",
-        "two",
-        "four",
+        (
+            [],
+            "the following arguments are required: --template/--templates, --values, "
+            "--out",
+        ),
+        (
+            [
+                "README.template",
+                "values.yaml",
+                "README.md",
+            ],
+            "the following arguments are required: --template/--templates, --values, "
+            "--out",
+        ),
+        (
+            [
+                "--values",
+                "values.yaml",
+                "--out",
+                "README.md",
+            ],
+            "the following arguments are required: --template/--templates",
+        ),
+        (
+            [
+                "--template",
+                "README.template",
+                "--out",
+                "README.md",
+            ],
+            "the following arguments are required: --values",
+        ),
+        (
+            [
+                "--template",
+                "README.template",
+                "--values",
+                "values.yaml",
+            ],
+            "the following arguments are required: --out",
+        ),
+        (
+            [
+                "--template",
+                "README.template",
+                "--values",
+                "values.yaml",
+                "--out",
+            ],
+            "argument --out: expected one argument",
+        ),
+        (
+            [
+                "--template",
+                "README.template",
+                "--val",
+                "values.yaml",
+                "--out",
+                "x.md",
+            ],
+            "the following arguments are required: --values",
+        ),
+        (
+            [
+                "--template",
+                "README.template",
+                "--values",
+                "values.yaml",
+                "--out",
+                "README.md",
+                "--force",
+            ],
+            "unrecognized arguments: --force",
+        ),
+        (
+            [
+                "--template",
+                "README.template",
+                "--values",
+                "values.yaml",
+                "--out",
+                "README.md",
+                "extra",
+            ],
+            "unrecognized arguments: extra",
+        ),
     ],
 )
-def test_refuses_wrong_number_of_arguments(
+def test_refuses_wrong_arguments(
     arguments: list[str],
+    message: str,
     capsys: CaptureFixture[str],
     monkeypatch: MonkeyPatch,
     project: Path,
@@ -1065,8 +1478,12 @@ def test_refuses_wrong_number_of_arguments(
     The wrong number of arguments must print usage and an error to stderr, exit with 2,
     and write nothing.
     """
+    # argparse wraps its usage to the terminal's width, and `USAGE` is one line.
+    monkeypatch.setenv("COLUMNS", "80")
+
     # Python 3.14's argparse colours its output when the environment asks for colour.
     monkeypatch.setenv("PYTHON_COLORS", "0")
+
     before = snapshot(project)
 
     with raises(SystemExit) as ex:
@@ -1076,16 +1493,23 @@ def test_refuses_wrong_number_of_arguments(
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.startswith(USAGE)
-    assert "\nplaten: error: " in captured.err
+    assert captured.err == f"{USAGE}platen: error: {message}\n"
     assert snapshot(project) == before
 
 
 @mark.parametrize(
-    ("template", "method"),
+    ("option", "template", "method"),
     [
-        (".", "press"),
-        ("README.template", "press_file"),
+        (
+            "--templates",
+            ".",
+            "press",
+        ),
+        (
+            "--template",
+            "README.template",
+            "press_file",
+        ),
     ],
     ids=[
         "directory",
@@ -1093,6 +1517,7 @@ def test_refuses_wrong_number_of_arguments(
     ],
 )
 def test_stops_quietly_when_interrupted(
+    option: str,
     template: str,
     method: str,
     capsys: CaptureFixture[str],
@@ -1106,7 +1531,18 @@ def test_stops_quietly_when_interrupted(
 
     monkeypatch.setattr(f"platen.cli.Platen.{method}", interrupt)
 
-    assert main([template, "values.yaml", "README.md"]) == 130
+    exit_code = main(
+        [
+            option,
+            template,
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+        ],
+    )
+
+    assert exit_code == 130
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -1119,7 +1555,11 @@ def test_version(capsys: CaptureFixture[str]) -> None:
     the other arguments.
     """
     with raises(SystemExit) as ex:
-        main(["--version"])
+        main(
+            [
+                "--version",
+            ],
+        )
 
     assert ex.value.code == 0
 
@@ -1143,7 +1583,11 @@ def test_version_without_metadata(
     monkeypatch.setattr("platen.cli.version", missing)
 
     with raises(SystemExit) as ex:
-        main(["--version"])
+        main(
+            [
+                "--version",
+            ],
+        )
 
     assert ex.value.code == 0
 
@@ -1182,7 +1626,18 @@ def test_warns_when_directory_has_nothing_to_press(
 
     before = snapshot(project)
 
-    assert main([template, "values.yaml", "build"]) == 0
+    exit_code = main(
+        [
+            "--templates",
+            template,
+            "--values",
+            "values.yaml",
+            "--out",
+            "build",
+        ],
+    )
+
+    assert exit_code == 0
 
     captured = capsys.readouterr()
     assert captured.out == ""

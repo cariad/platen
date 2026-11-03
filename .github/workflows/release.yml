@@ -46,9 +46,9 @@ jobs:
           uv run --isolated --no-project \
             --with "dist/platen-${GITHUB_REF_NAME#v}-py3-none-any.whl" \
             platen \
-              examples/task_list/templates \
-              examples/task_list/tasks.yaml \
-              "${RUNNER_TEMP}/task_list"
+              --templates examples/task_list/templates  \
+              --values    examples/task_list/tasks.yaml \
+              --out       "${RUNNER_TEMP}/task_list"
 
           diff --recursive examples/task_list/build "${RUNNER_TEMP}/task_list"
 
