@@ -271,30 +271,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             (with 0).
     """
     parser = ArgumentParser(
+        # Prefixes like "--temp" are ambiguous between the template's two names, and
+        # any prefix would break whenever a new option shared it.
+        allow_abbrev=False,
         description="Press structured data into documents.",
         prog="platen",
-    )
-
-    parser.add_argument(
-        "template",
-        help=(
-            "path to the template to press, or to a directory of templates to press "
-            "them all; included templates are found relative to the template's "
-            "directory, or to that directory"
-        ),
-    )
-
-    parser.add_argument(
-        "values",
-        help="path to the YAML file of values to press into the templates",
-    )
-
-    parser.add_argument(
-        "output",
-        help=(
-            "path to the file to press to, or the directory to press into when the "
-            "template is a directory"
-        ),
     )
 
     parser.add_argument(
@@ -305,10 +286,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         nargs=0,
     )
 
+    parser.add_argument(
+        "--template",
+        "--templates",
+        help="path to the template or directory of templates to press",
+        metavar="PATH",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--values",
+        help="path to the YAML file of values to press into the templates",
+        metavar="PATH",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--out",
+        help="path to the file or directory to press into",
+        metavar="PATH",
+        required=True,
+    )
+
     arguments = parser.parse_args(argv)
 
     try:
-        pressed = _press(arguments.template, arguments.values, arguments.output)
+        pressed = _press(
+            arguments.template,
+            arguments.values,
+            arguments.out,
+        )
+
     except KeyboardInterrupt:
         # Stop quietly, with the exit code that shells give an interrupted command.
         return 130

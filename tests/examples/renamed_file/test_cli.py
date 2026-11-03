@@ -20,10 +20,13 @@ def test(
 
     exit_code = main(
         [
+            "--template",
             str(templates_dir / "README.template"),
+            "--values",
             str(values),
+            "--out",
             str(output_dir / "README.md"),
-        ]
+        ],
     )
 
     assert exit_code == 0

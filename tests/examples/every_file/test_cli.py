@@ -16,7 +16,16 @@ def test(
     in the output directory.
     """
     values = Path(__file__).parent / "values.yaml"
-    exit_code = main([str(templates_dir), str(values), str(output_dir)])
+    exit_code = main(
+        [
+            "--templates",
+            str(templates_dir),
+            "--values",
+            str(values),
+            "--out",
+            str(output_dir),
+        ],
+    )
 
     assert exit_code == 0
     assert_output_matches_expect()

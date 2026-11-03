@@ -171,19 +171,27 @@ Installing Platen also installs the `platen` command. To install only the comman
 The command presses a template, or a directory of templates:
 
 ```text
-platen TEMPLATE VALUES OUTPUT
+platen --template FILE \
+       --values   FILE \
+       --out      FILE
+
+platen --templates DIRECTORY \
+       --values    FILE      \
+       --out       DIRECTORY
 ```
+
+`--template` and `--templates` are the same option, so either one can name a file or a directory. The options can come in any order.
 
 For example, to press `README.template` to `README.md` with the values in `values.yaml`:
 
 ```shell
-platen README.template values.yaml README.md
+platen --template README.template --values values.yaml --out README.md
 ```
 
 Or to press every template in the `templates` directory into the `build` directory:
 
 ```shell
-platen templates values.yaml build
+platen --templates templates --values values.yaml --out build
 ```
 
 - The values file is read as YAML, whatever its name, and must hold a mapping of names to values. An empty file holds no values.
