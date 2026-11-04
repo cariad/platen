@@ -279,6 +279,43 @@ def test_directories_finds_same_directories_for_any_spelling(
     assert result == expect
 
 
+@mark.parametrize(
+    "relative",
+    [
+        True,
+        False,
+    ],
+)
+def test_directories_finds_where_dot_dot_leads_after_symlink(
+    relative: bool,
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    `directories` must watch the directory that `..` leads to after a symlink, which
+    steps out of where the symlink leads rather than out of the symlink's own directory,
+    so that a change to the file there is seen at once.
+    """
+    (tmp_path / "config" / "version").mkdir(parents=True)
+    (tmp_path / "config" / "values.yaml").write_text("a: 1\n", encoding="utf-8")
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "inputs" / "current").symlink_to(tmp_path / "config" / "version")
+    monkeypatch.chdir(tmp_path)
+
+    path = "inputs/current/../values.yaml"
+
+    if not relative:
+        path = str(tmp_path / path)
+
+    result = directories(path, [path])
+    expect = _real(
+        tmp_path / "config",
+        tmp_path / "inputs",
+    )
+
+    assert result == expect
+
+
 def test_directories_finds_working_directory_for_name_without_directory(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,

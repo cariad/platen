@@ -1,6 +1,6 @@
 from collections.abc import Iterable
-from os import R_OK, X_OK, access, scandir, walk
-from os.path import abspath, dirname, isdir, islink, join, realpath
+from os import R_OK, X_OK, access, getcwd, scandir, walk
+from os.path import dirname, isabs, isdir, islink, join, realpath
 from pathlib import Path
 
 
@@ -91,7 +91,10 @@ def directories(template: str, paths: Iterable[str]) -> frozenset[str]:
     leading: set[str] = set()
 
     for path in paths:
-        absolute = abspath(path)
+        # Anchor a relative path without collapsing `..`, like `abspath` would, because
+        # `..` after a symlink steps out of where the symlink leads, not out of the
+        # symlink's own directory.
+        absolute = path if isabs(path) else join(getcwd(), path)
 
         try:
             # Watch the directory that holds the path's last part, and the directory
