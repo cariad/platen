@@ -19,9 +19,9 @@ def _status(inode: int) -> Status:
     ("before", "after"),
     [
         (("a.md",), ("a.md", "b.md")),
-        # The template became a directory while the press ran.
+        # The template appeared while the press ran.
         (None, ("a.md",)),
-        # The template stopped being a directory while the press ran.
+        # The template disappeared while the press ran.
         (("a.md",), None),
     ],
 )
@@ -34,9 +34,21 @@ def test_baseline_gives_names_from_before(
     press pressed those, so that a walk that changed while it ran presses again.
     """
     pressed = baseline(
-        Look(before, {"templates": _status(1)}),
+        Look(
+            "/templates",
+            before,
+            {
+                "templates": _status(1),
+            },
+        ),
         {},
-        Look(after, {"templates": _status(1)}),
+        Look(
+            "/templates",
+            after,
+            {
+                "templates": _status(1),
+            },
+        ),
     )
 
     assert pressed.names == before
@@ -49,13 +61,32 @@ def test_baseline_gives_status_from_after_to_path_not_looked_at_before() -> None
     time, its status from after the press, because it couldn't be looked at before.
     """
     pressed = baseline(
-        Look(None, {"a.md": _status(1)}),
+        Look(
+            None,
+            None,
+            {
+                "a.md": _status(1),
+            },
+        ),
         {},
-        Look(None, {"a.md": _status(1), "b.md": _status(2), "c.md": None}),
+        Look(
+            None,
+            None,
+            {
+                "a.md": _status(1),
+                "b.md": _status(2),
+                "c.md": None,
+            },
+        ),
     )
     expect = Look(
         None,
-        {"a.md": _status(1), "b.md": _status(2), "c.md": None},
+        None,
+        {
+            "a.md": _status(1),
+            "b.md": _status(2),
+            "c.md": None,
+        },
     )
 
     assert pressed == expect
@@ -81,11 +112,27 @@ def test_baseline_gives_status_from_before_to_path_known_before(
     of date as soon as the press ends.
     """
     pressed = baseline(
-        Look(None, {"a.md": before, "b.md": _status(3)}),
+        Look(
+            None,
+            None,
+            {
+                "a.md": before,
+                "b.md": _status(3),
+            },
+        ),
         {},
-        Look(None, {"a.md": after, "b.md": _status(3)}),
+        Look(
+            None,
+            None,
+            {
+                "a.md": after,
+                "b.md": _status(3),
+            },
+        ),
     )
+
     expect = Look(
+        None,
         None,
         {"a.md": before, "b.md": _status(3)},
     )
@@ -117,16 +164,69 @@ def test_baseline_gives_status_from_read_to_path_that_press_read(
     after the press read it is out of date as soon as the press ends.
     """
     pressed = baseline(
-        Look(None, before),
+        Look(
+            None,
+            None,
+            before,
+        ),
         {"a.md": read},
-        Look(None, {"a.md": _status(3)}),
+        Look(
+            None,
+            None,
+            {
+                "a.md": _status(3),
+            },
+        ),
     )
+
     expect = Look(
+        None,
         None,
         {"a.md": read},
     )
 
     assert pressed == expect
+
+
+@mark.parametrize(
+    ("before", "after"),
+    [
+        # A symlink to the template's directory was retargeted while the press ran.
+        ("/a", "/b"),
+        # The template appeared while the press ran.
+        (None, "/a"),
+        # The template disappeared while the press ran.
+        ("/a", None),
+    ],
+)
+def test_baseline_gives_templates_dir_from_before(
+    before: str | None,
+    after: str | None,
+) -> None:
+    """
+    `baseline` must give the templates directory from before the press, because the
+    press loaded templates from there, so that one that changed while it ran presses
+    again.
+    """
+    pressed = baseline(
+        Look(
+            before,
+            ("doc.md",),
+            {
+                "doc.md": _status(1),
+            },
+        ),
+        {},
+        Look(
+            after,
+            ("doc.md",),
+            {
+                "doc.md": _status(1),
+            },
+        ),
+    )
+
+    assert pressed.templates_dir == before
 
 
 def test_baseline_leaves_out_path_not_looked_at_after() -> None:
@@ -135,11 +235,12 @@ def test_baseline_leaves_out_path_not_looked_at_after() -> None:
     like a template that the press no longer includes, so that it's no longer watched.
     """
     pressed = baseline(
-        Look(None, {"a.md": _status(1), "b.md": _status(2)}),
+        Look(None, None, {"a.md": _status(1), "b.md": _status(2)}),
         {},
-        Look(None, {"a.md": _status(1)}),
+        Look(None, None, {"a.md": _status(1)}),
     )
     expect = Look(
+        None,
         None,
         {"a.md": _status(1)},
     )

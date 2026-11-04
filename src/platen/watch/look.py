@@ -1,11 +1,45 @@
 from collections.abc import Iterable
 from functools import lru_cache
+from os.path import split
 from pathlib import Path
 from stat import S_ISDIR
+
+from rootle import relative_within
 
 from ..platen import Platen
 from .status import status
 from .types import Look
+
+
+def _name(template: str) -> tuple[str | None, str | None]:
+    """
+    Name a template that isn't a directory, the way a press of it would.
+
+    A press loads templates from the template's own directory, resolved, and names the
+    template by the file that it leads to, through any symlinks, within that directory.
+
+    Args:
+        template: Path to the template, as it was given.
+
+    Returns:
+        The real path to the source templates directory, and the template's name within
+        it. The name is `None` when the template leads outside the directory, and both
+        are `None` when either can't be resolved, like when a part of the path can't be
+        read. A press fails in each of those cases.
+    """
+    # `platen.cli` splits the template like this to find its templates directory.
+    directory, name = split(template)
+
+    try:
+        templates_dir = Path(directory or ".").resolve()
+
+        # Like `Platen.press_file` names it, which can't be asked without pressing.
+        relative = relative_within(templates_dir / name, templates_dir)
+
+    except OSError:
+        return None, None
+
+    return str(templates_dir), None if relative is None else relative.as_posix()
 
 
 @lru_cache(maxsize=1)
@@ -44,10 +78,18 @@ def look(template: str, values_path: str, read: Iterable[str]) -> Look:
         The look.
     """
     paths = [template, values_path, *read]
+    templates_dir: str | None = None
     names: tuple[str, ...] | None = None
 
-    if (found := status(template)) is not None and S_ISDIR(found.mode):
+    found = status(template)
+
+    if found is not None and not S_ISDIR(found.mode):
+        templates_dir, name = _name(template)
+        names = None if name is None else (name,)
+
+    elif found is not None:
         platen = _platen(Path(template).resolve())
+        templates_dir = str(platen.templates_dir)
 
         try:
             names = tuple(platen.templates())
@@ -59,4 +101,8 @@ def look(template: str, values_path: str, read: Iterable[str]) -> Look:
         else:
             paths.extend(str(platen.templates_dir / name) for name in names)
 
-    return Look(names, {path: status(path) for path in paths})
+    return Look(
+        templates_dir,
+        names,
+        {path: status(path) for path in paths},
+    )

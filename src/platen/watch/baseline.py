@@ -27,6 +27,7 @@ def baseline(
         The look to compare later looks with.
     """
     return Look(
+        before.templates_dir,
         before.names,
         {
             path: read[path] if path in read else before.statuses.get(path, found)

@@ -2958,6 +2958,142 @@ def test_watch_presses_again_when_missing_input_returns(
     assert pressed == b"# platen\n\nBuild: passing\n"
 
 
+def test_watch_presses_again_when_template_symlink_is_retargeted_to_hard_link(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must press again when a symlink to the template is retargeted to a
+    hard link to the same file by another name, even though nothing that it reads has
+    changed, because Jinja chooses autoescaping by that name.
+    """
+    _create(
+        project,
+        {
+            "body.txt": "{{ name }}\n",
+            "values.yaml": 'name: "<b>"\n',
+        },
+    )
+
+    link(
+        project / "body.txt",
+        project / "body.html",
+    )
+
+    _create(
+        project,
+        {},
+        {
+            "README.template": "body.txt",
+        },
+    )
+
+    # Retarget the symlink atomically, like `ln -sfn` does.
+    _watching(
+        monkeypatch,
+        lambda: (
+            _create(
+                project,
+                {},
+                {
+                    "README.new": "body.html",
+                },
+            ),
+            os.replace(
+                "README.new",
+                "README.template",
+            ),
+        ),
+    )
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_FILE}{WATCHING}{PRESSED_FILE}"
+
+    result = (project / "README.md").read_bytes()
+    assert result == b"&lt;b&gt;\n"
+
+
+def test_watch_presses_again_when_templates_directory_symlink_is_retargeted(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must press again when a symlink to the template's directory is
+    retargeted to a copy made of hard links, even though nothing that it reads has
+    changed, and then press again when an include in the copy is replaced, because
+    includes are found there.
+    """
+    _create(
+        project,
+        {
+            "a/_footer.md": "Footer\n",
+            "a/page.md": '{% include "_footer.md" %}',
+        },
+        {
+            "site": "a",
+        },
+    )
+
+    # A copy made of hard links, like `cp -al` makes.
+    (project / "b").mkdir()
+
+    for name in ("_footer.md", "page.md"):
+        link(
+            project / "a" / name,
+            project / "b" / name,
+        )
+
+    _watching(
+        monkeypatch,
+        # Retarget the symlink atomically, like `ln -sfn` does.
+        lambda: (
+            _create(project, {}, {"site.new": "b"}),
+            os.replace("site.new", "site"),
+        ),
+        lambda: _replace(project / "b" / "_footer.md", "New footer\n"),
+    )
+
+    exit_code = main(
+        [
+            "--template",
+            "site/page.md",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+    pressed = "platen: Pressed 'site/page.md' to 'README.md'\n"
+    assert captured.err == f"{pressed}{WATCHING}{pressed}{pressed}"
+
+    result = (project / "README.md").read_bytes()
+    assert result == b"New footer\n"
+
+
 def test_watch_presses_again_with_real_watcher(project: Path) -> None:
     """
     `platen --watch` must press again as soon as watchfiles sees a change, rather than

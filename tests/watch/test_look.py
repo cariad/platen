@@ -1,5 +1,6 @@
-from errno import EIO
-from os import strerror
+from errno import EACCES, EIO
+from importlib import import_module
+from os import link, replace, strerror, symlink
 from os.path import join, realpath
 from pathlib import Path
 
@@ -88,6 +89,31 @@ def test_look_changes_when_file_is_edited(
     assert result != before
 
 
+def test_look_changes_when_template_symlink_is_retargeted_to_hard_link(
+    project: Path,
+) -> None:
+    """
+    `look` must see a symlink to the template retargeted to a hard link to the same
+    file by another name, by the template's name, even though no status has changed,
+    because Jinja chooses autoescaping by that name.
+    """
+    (project / "body.txt").write_text("<p>{{ name }}</p>\n", encoding="utf-8")
+    link(project / "body.txt", project / "body.html")
+    symlink("body.txt", project / "page.template")
+
+    before = look("page.template", "values.yaml", [])
+
+    # Retarget the symlink atomically, like `ln -sfn` does.
+    symlink("body.html", project / "page.new")
+    replace(project / "page.new", project / "page.template")
+
+    after = look("page.template", "values.yaml", [])
+
+    assert before.names == ("body.txt",)
+    assert after.names == ("body.html",)
+    assert after.statuses == before.statuses
+
+
 def test_look_changes_when_template_that_was_read_is_ignored(project: Path) -> None:
     """
     `look` must see a template that the last press read become ignored, by the names
@@ -111,6 +137,45 @@ def test_look_changes_when_template_that_was_read_is_ignored(project: Path) -> N
     assert after.statuses == before.statuses
 
 
+def test_look_changes_when_templates_directory_symlink_is_retargeted_to_hard_links(
+    project: Path,
+) -> None:
+    """
+    `look` must see a symlink to the template's directory retargeted to a copy made of
+    hard links, by the templates directory, even though no status has changed, because
+    includes are found there.
+    """
+    for directory in ("a", "b"):
+        (project / directory).mkdir()
+
+    (project / "a" / "page.md").write_text(
+        '{% include "_footer.md" %}\n',
+        encoding="utf-8",
+    )
+
+    (project / "a" / "_footer.md").write_text("Footer\n", encoding="utf-8")
+
+    # A copy made of hard links, like `cp -al` makes.
+    for name in ("page.md", "_footer.md"):
+        link(project / "a" / name, project / "b" / name)
+
+    symlink("a", project / "site", target_is_directory=True)
+    read = [realpath(project / "a" / "_footer.md")]
+
+    before = look("site/page.md", "values.yaml", read)
+
+    # Retarget the symlink atomically, like `ln -sfn` does.
+    symlink("b", project / "site.new", target_is_directory=True)
+    replace(project / "site.new", project / "site")
+
+    after = look("site/page.md", "values.yaml", read)
+
+    assert before.templates_dir == realpath(project / "a")
+    assert after.templates_dir == realpath(project / "b")
+    assert after.names == before.names
+    assert after.statuses == before.statuses
+
+
 def test_look_does_not_change_when_ignore_file_gains_comment(project: Path) -> None:
     """
     `look` must not see an edit to a `.platenignore` file that doesn't change what a
@@ -129,17 +194,75 @@ def test_look_does_not_change_when_ignore_file_gains_comment(project: Path) -> N
     assert result == before
 
 
+def test_look_finds_no_name_when_template_cannot_be_named(
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `look` must find no templates directory and no name when the template can't be
+    named, like when a part of its path can't be read, because a press would fail too.
+    """
+
+    def relative_within(*_: object) -> None:
+        raise PermissionError(EACCES, strerror(EACCES))
+
+    # Import the module, because `platen.watch.look` names the function, which shadows
+    # its module.
+    monkeypatch.setattr(
+        import_module("platen.watch.look"),
+        "relative_within",
+        relative_within,
+    )
+
+    found = look("README.template", "values.yaml", [])
+    expect = Look(
+        None,
+        None,
+        {
+            "README.template": status("README.template"),
+            "values.yaml": status("values.yaml"),
+        },
+    )
+
+    assert found == expect
+
+
+def test_look_finds_no_name_when_template_leads_outside_its_directory(
+    project: Path,
+) -> None:
+    """
+    `look` must find no name for a template that leads outside its own directory,
+    through a symlink, because a press would refuse it.
+    """
+    (project / "sub").mkdir()
+    symlink("../README.template", project / "sub" / "page.template")
+
+    found = look("sub/page.template", "values.yaml", [])
+    expect = Look(
+        realpath(project / "sub"),
+        None,
+        {
+            "sub/page.template": status("sub/page.template"),
+            "values.yaml": status("values.yaml"),
+        },
+    )
+
+    assert found == expect
+
+
 def test_look_finds_template_values_and_templates_read(project: Path) -> None:
     """
     `look` must find the status of the template, the values file and each template
-    that the last press read, by their paths as given, and no names, when the template
-    is a file. Files beside the template that the press didn't read are left out.
+    that the last press read, by their paths as given, the template's directory as the
+    templates directory, and the template's name, when the template is a file. Files
+    beside the template that the press didn't read are left out.
     """
     badge = realpath(project / "_badge.txt")
 
     found = look("README.template", "values.yaml", [badge])
     expect = Look(
-        None,
+        realpath(project),
+        ("README.template",),
         {
             "README.template": status("README.template"),
             "values.yaml": status("values.yaml"),
@@ -184,7 +307,11 @@ def test_look_finds_walked_templates_in_directory(
         join(templates_dir, "doc.md"),
         join(templates_dir, "sub/doc.md"),
     ]
-    expect = Look(("doc.md", "sub/doc.md"), {p: status(p) for p in paths})
+    expect = Look(
+        templates_dir,
+        ("doc.md", "sub/doc.md"),
+        {p: status(p) for p in paths},
+    )
 
     assert found == expect
 
@@ -201,6 +328,7 @@ def test_look_watches_file_that_stops_walk(project: Path) -> None:
 
     found = look("templates", "values.yaml", [])
     expect = Look(
+        realpath(project / "templates"),
         None,
         {
             "templates": status("templates"),
@@ -219,6 +347,7 @@ def test_look_watches_missing_template(project: Path) -> None:
     """
     found = look("missing.md", "values.yaml", [])
     expect = Look(
+        None,
         None,
         {
             "missing.md": None,
@@ -247,6 +376,7 @@ def test_look_watches_templates_directory_when_walk_error_names_no_file(
 
     found = look("templates", "values.yaml", [])
     expect = Look(
+        realpath(project / "templates"),
         None,
         {
             "templates": status("templates"),
