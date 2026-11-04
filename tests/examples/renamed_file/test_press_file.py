@@ -23,4 +23,6 @@ def test(
     )
 
     pressed = [p for p in output_dir.rglob("*") if p.is_file()]
-    assert pressed == [output_dir / "README.md"]
+    expect = [output_dir / "README.md"]
+
+    assert pressed == expect

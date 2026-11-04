@@ -39,11 +39,27 @@ log = getLogger(__name__)
 
 class _Loader(FileSystemLoader):
     """
-    Loads templates like `FileSystemLoader`, but names a template that isn't UTF-8.
+    Loads templates like `FileSystemLoader`, but names a template that isn't UTF-8, and
+    records the path to every template that it's asked for.
 
     Every template is loaded through here, whether it's pressed or referenced (by
     `extends`, `include`, `import`, etc) while another is rendered.
     """
+
+    def __init__(
+        self,
+        searchpath: Path,
+        on_load: Callable[[Path], object] | None,
+    ) -> None:
+        super().__init__(searchpath)
+
+        self.loaded: set[Path] = set()
+        """
+        Path to every template file that the loader has loaded or tried to load, whether
+        or not it was found, was a regular file, or was UTF-8.
+        """
+
+        self._on_load = on_load
 
     def get_source(
         self,
@@ -51,7 +67,8 @@ class _Loader(FileSystemLoader):
         template: str,
     ) -> tuple[str, str, Callable[[], bool]]:
         """
-        Load a template's source.
+        Load a template's source, record its path in `loaded`, and pass its path to
+        `on_load`.
 
         Args:
             environment: The environment that's loading the template.
@@ -64,12 +81,28 @@ class _Loader(FileSystemLoader):
         Raises:
             TemplateNotPressableError: When the template isn't UTF-8.
         """
+        # This is the file that Jinja reads, from the only directory that it searches.
+        # `split_template_path` raises the same `TemplateNotFound` for a name like
+        # "../doc.md" as Jinja would.
+        path = Path(
+            self.searchpath[0],
+            *split_template_path(template),
+        )
+
+        # Record the path before reading it, so that a template that's missing, isn't a
+        # regular file, or isn't UTF-8 is recorded too. Watching for changes needs that,
+        # because creating or fixing that template is the change to watch for. It needs
+        # to look at the template before it's read too, so that a change made after it
+        # was read is seen.
+        self.loaded.add(path)
+
+        if self._on_load is not None:
+            self._on_load(path)
+
         try:
             return super().get_source(environment, template)
         except UnicodeDecodeError as error:
-            # Jinja reads templates as UTF-8, and its error doesn't name the file. Name
-            # the file that Jinja read, from the only directory that it searches.
-            path = Path(self.searchpath[0], *split_template_path(template))
+            # Jinja reads templates as UTF-8, and its error doesn't name the file.
             reason = f"it isn't valid UTF-8 ({error.reason} at byte {error.start})"
             raise TemplateNotPressableError(path, reason) from error
 
@@ -109,6 +142,11 @@ class Platen:
     `.press_directory(directory, destination)` to press every template within a
     subdirectory.
 
+    Call `.templates()` to find the templates that `.press(destination)` would press,
+    without pressing them, read `.loaded` to find every template that a press has read,
+    including those that it references, and read `.written` to find every file that a
+    press has written.
+
     `templates_dir` is the root of a tree of templates:
 
     - Jinja resolves referenced templates (`extends`, `include`, `import`, etc) relative
@@ -137,6 +175,10 @@ class Platen:
     Args:
         templates_dir: Path to the source templates directory.
         values: Values to press into the templates.
+        on_load: Called with the path to every template file that a press loads or tries
+            to load, as `loaded` names it, just before the press reads it, like to look
+            at the file as it was pressed.
+
         protect: Paths to files that must never be pressed over, like the file that the
             values were read from.
 
@@ -149,6 +191,7 @@ class Platen:
         templates_dir: PathLike[str] | str,
         values: Mapping[str, Any],
         *,
+        on_load: Callable[[Path], object] | None = None,
         protect: Iterable[PathLike[str] | str] = (),
     ) -> None:
         self._templates_dir = Path(templates_dir).resolve()
@@ -158,10 +201,17 @@ class Platen:
         # aren't resolved until each press, so that they're checked where they lead.
         self._protect = tuple(Path(p).absolute() for p in protect)
 
+        self._loader = _Loader(
+            self._templates_dir,
+            on_load,
+        )
+
+        self._written: set[Path] = set()
+
         self._env = Environment(
             autoescape=select_autoescape(),
             keep_trailing_newline=True,
-            loader=_Loader(self._templates_dir),
+            loader=self._loader,
             lstrip_blocks=True,
             trim_blocks=True,
             undefined=StrictUndefined,
@@ -245,6 +295,10 @@ class Platen:
             log.debug("Pressing %s", name)
             body = self._template(name).render(self._values)
             destination.parent.mkdir(exist_ok=True, parents=True)
+
+            # Record the destination before writing it, so that one that a failed write
+            # left half-written is recorded too.
+            self._written.add(destination)
 
             destination.write_text(
                 body,
@@ -331,6 +385,11 @@ class Platen:
                 raise
 
             raise TemplateNotPressableError(path, "it isn't a regular file") from None
+
+    @property
+    def loaded(self) -> frozenset[Path]:
+        """Path to every template that this `Platen` has loaded or tried to load."""
+        return frozenset(self._loader.loaded)
 
     def press(self, destination: PathLike[str] | str) -> int:
         """
@@ -454,9 +513,7 @@ class Platen:
         # Finish the walk before pressing anything. Mosey lists each directory as it
         # reaches it, so a result written into the templates directory, like through a
         # symlink within the destination, could otherwise be walked and pressed too.
-        templates = [
-            step.relative_as_posix for step in self._walker.walk(self._templates_dir)
-        ]
+        templates = self.templates()
 
         jobs = [
             (
@@ -549,7 +606,32 @@ class Platen:
             [name],
         )
 
+    def templates(self) -> list[str]:
+        """
+        Name every template within the source templates directory that `press()` would
+        press, without pressing anything.
+
+        Returns:
+            POSIX-style path to each template, relative to the source templates
+            directory, in walk order: https://cariad.github.io/mosey/walk-order/
+
+        Raises:
+            OSError: When the directory can't be walked, or when a `.platenignore` file
+                can't be read.
+        """
+        return [
+            step.relative_as_posix for step in self._walker.walk(self._templates_dir)
+        ]
+
     @property
     def templates_dir(self) -> Path:
         """Path to the source templates directory."""
         return self._templates_dir
+
+    @property
+    def written(self) -> frozenset[Path]:
+        """
+        Path to every file that this `Platen` has written to or tried to write to, as
+        each destination was given.
+        """
+        return frozenset(self._written)

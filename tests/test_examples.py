@@ -21,4 +21,7 @@ def test_task_list(tmp_path: Path) -> None:
 
     Platen(example / "templates", cast(Mapping[str, Any], values)).press(tmp_path)
 
-    assert snapshot(tmp_path) == snapshot(example / "build")
+    result = snapshot(tmp_path)
+    expect = snapshot(example / "build")
+
+    assert result == expect
