@@ -21,6 +21,8 @@ def test(
     relative path in the destination. The number of files must be returned,
     and nothing must be logged as a warning.
     """
-    assert platen.press_directory(platen.templates_dir, output_dir) == 4
+    result = platen.press_directory(platen.templates_dir, output_dir)
+
+    assert result == 4
     assert_output_matches_expect()
     assert not [r for r in caplog.records if r.levelno >= WARNING]

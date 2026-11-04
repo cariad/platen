@@ -173,11 +173,13 @@ The command presses a template, or a directory of templates:
 ```text
 platen --template FILE \
        --values   FILE \
-       --out      FILE
+       --out      FILE \
+       [--watch]
 
 platen --templates DIRECTORY \
        --values    FILE      \
-       --out       DIRECTORY
+       --out       DIRECTORY \
+       [--watch]
 ```
 
 `--template` and `--templates` are the same option, so either one can name a file or a directory. The options can come in any order.
@@ -200,8 +202,6 @@ platen --templates templates --values values.yaml --out build
 - A directory of templates is the templates directory, and it's pressed like `press()`: every file within it is pressed to the same path within the output, common [binary files](#binary-files) are skipped, `.platenignore` files apply, and included templates are found relative to the directory. Symlinks to files within it are pressed with their targets' content, wherever they lead. A symlink to a directory, a FIFO or a device, or a broken one, stops the press unless a `.platenignore` file lists it.
 - A directory's output is a directory, and it's created if it's missing. It can't be within the directory being pressed, and nothing in it is ever deleted. If the values file is within the directory, list it in a `.platenignore` file, or it'll be pressed as a template too. Keep your templates in a directory of their own, rather than `.`, as [pressing a directory](#pressing-a-directory) explains.
 
-Platen prints nothing when it succeeds, unless a directory has nothing to press because it's empty or everything in it is ignored. Then, it prints a warning and still exits with `0`. When it fails, it prints a one-line error and exits with `1`, or prints its usage too and exits with `2` when the arguments are wrong. When it's interrupted, it stops quietly with `130`.
-
 When the command runs in `/home/me/cv`, its warnings and errors look like this:
 
 ```text
@@ -212,6 +212,22 @@ platen: error: 'name' is undefined (/home/me/cv/README.template, line 1)
 Errors name each template that Platen found by its absolute path, which can look different from how you typed it, like `/private/tmp` for `/tmp` on macOS. They name destinations as you typed them.
 
 Platen presses one file at a time, and stops at the first error. The outputs that it wrote before the error stay written. See [When a press fails](#when-a-press-fails).
+
+### Watching for changes
+
+With `--watch`, Platen presses, then presses again whenever the templates or values change, until you interrupt it. For example, to keep `README.md` up to date while you edit `README.template` and `values.yaml`:
+
+```shell
+platen --template README.template --values values.yaml --out README.md --watch
+```
+
+Platen presses again when any of these change:
+
+- The template, or directory of templates.
+- The values file. Every press reads it again.
+- Every template that the last press read, whether it was pressed or included, extended or imported, even when the press failed. That includes the names that the press looked for but couldn't find, like one that `ignore missing` skipped, so creating one presses again.
+- When you press a directory, which templates a walk of it finds, and each of those templates. So adding, deleting, renaming or newly ignoring a template presses again.
+- When a walk fails, the file or directory that it failed on, so that fixing it presses again.
 
 ## Choosing what to press, and where
 
@@ -307,6 +323,45 @@ Anything else, like a file that can't be read or written, raises the operating s
 
 `DestinationIsProtectedError`, `DestinationIsTemplateError`, `DestinationWithinDirectoryError`, `TemplateNotInDirectoryError` and `TemplateNotPressableError` are subclasses of `PlatenError` and `ValueError`.
 
+## Finding what a press reads
+
+`templates()` names every template that `press()` would press, without pressing anything. It walks the templates directory like `press()` does: `.platenignore` files apply, common binary files are skipped, and symlinks are named like files and never walked into.
+
+`loaded` is the path to every template file that the `Platen` has loaded or tried to load. That's every template that a press read, whether it was pressed or included, extended or imported, and whether or not it was found, was a regular file, or was UTF-8. So a name that `ignore missing` skipped, or that a list of templates passed over, is there too, and so is every template that a press read before it failed.
+
+Say `about.md` includes `_partials/header.md`, which a `.platenignore` file ignores:
+
+```python
+from platen import Platen
+
+platen = Platen("/home/me/site/templates", values)
+
+platen.templates()  # ["about.md", "posts/hello.md"]
+
+platen.press("build")
+
+sorted(platen.loaded)
+# [
+#     Path("/home/me/site/templates/_partials/header.md"),
+#     Path("/home/me/site/templates/about.md"),
+#     Path("/home/me/site/templates/posts/hello.md"),
+# ]
+```
+
+Each path in `loaded` is `templates_dir` joined with the template's name, so it isn't resolved through symlinks. Jinja caches the templates that it loads, so a later press by the same `Platen` only adds the templates that it loads for the first time. Create a new `Platen` to find what a single press reads.
+
+To look at each template as it was pressed, pass `on_load`. It's called with each path that `loaded` names, just before the press reads that template, so a change made after it's called is a change since the press:
+
+```python
+platen = Platen("/home/me/site/templates", values, on_load=print)
+```
+
+`on_load` can be called with a path more than once. Jinja asks for a template that it couldn't load — like a missing template that `ignore missing` skipped — every time a press needs it, and reads a template again when its modification time changes during the press.
+
+`written` is the path to every file that the `Platen` has written to or tried to write to, as each destination was named, including one that a failed write left half-written.
+
+`platen --watch` uses `templates()` and `on_load` to find what to watch, and how it was when it was pressed, and `written` to leave out any output that a template reads: see [Watching for changes](#watching-for-changes).
+
 ## Binary files
 
 Every file that Platen presses is a template, so it must be UTF-8. Platen never copies a file as it is.
@@ -336,3 +391,7 @@ The `.platenignore` files themselves aren't pressed, unless a line like `!.plate
 `.platenignore` files only apply to `press` and `press_directory`. `press_file` always presses the template that you name.
 
 Platen reads `.platenignore` files with [Mosey](https://cariad.github.io/mosey/), so see Mosey's [ignore-files guide](https://cariad.github.io/mosey/ignore-files/) for the exact rules.
+
+!!! tip
+
+    List your editor's temporary files, like `*.swp`, `*~` and `.#*`, in a `.platenignore` file. Otherwise, a press that runs while you're editing, like when you're [watching for changes](#watching-for-changes), presses them as templates, or stops on them.

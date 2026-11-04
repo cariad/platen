@@ -1,17 +1,45 @@
 import os
+import sys
+from collections.abc import Callable, Iterator
 from errno import EIO
 from importlib.metadata import PackageNotFoundError, entry_points, version
-from os import R_OK, W_OK, access, link, strerror
+from itertools import count
+from os import R_OK, PathLike, access, link, strerror
 from os.path import exists, isabs, realpath
 from pathlib import Path
+from queue import Empty, Queue
+from shutil import copymode
+from signal import SIGINT
+from stat import S_IMODE
+from subprocess import PIPE, Popen, run
+from threading import Thread
+from time import sleep
+from typing import cast
 
 from jinja2 import TemplateSyntaxError
-from pytest import CaptureFixture, MonkeyPatch, fixture, mark, raises, skip
+from pytest import CaptureFixture, MonkeyPatch, fail, fixture, mark, raises, skip
+from rootle.testing import (
+    can_chmod_deny_listing,
+    can_chmod_deny_search,
+    can_chmod_deny_writing,
+)
+from watchfiles import Change
 
+from platen import Platen
 from platen.cli import main
+from tests.edits import edit
 from tests.snapshots import snapshot
 
-USAGE = "usage: platen [-h] [--version] --template PATH --values PATH --out PATH\n"
+PRESSED_DIRECTORY = "platen: Pressed 'templates' to 'build'\n"
+
+PRESSED_FILE = "platen: Pressed 'README.template' to 'README.md'\n"
+
+USAGE = (
+    "usage: platen [-h] [--version] --template PATH --values PATH --out PATH\n"
+    "              [--watch]\n"
+)
+
+WATCHING = "platen: Watching for changes. Press Ctrl+C to stop.\n"
 
 
 def _assert_fails(
@@ -36,7 +64,101 @@ def _assert_fails(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == f"platen: error: {message}\n"
-    assert snapshot(directory) == before
+
+    result = snapshot(directory)
+
+    assert result == before
+
+
+def _create(
+    directory: Path,
+    files: dict[str, str],
+    links: dict[str, str] | None = None,
+) -> None:
+    """
+    Create files within a directory, and then symlinks, creating missing directories
+    and replacing whatever is already at each symlink's path.
+    """
+    for name, body in files.items():
+        path = directory / name
+        path.parent.mkdir(exist_ok=True, parents=True)
+        path.write_text(body, encoding="utf-8")
+
+    for name, target in (links or {}).items():
+        path = directory / name
+        path.parent.mkdir(exist_ok=True, parents=True)
+        path.unlink(missing_ok=True)
+        path.symlink_to(target)
+
+
+def _replace(path: Path, body: str) -> None:
+    """
+    Replace a file with a new one, like an editor that saves atomically, so that its
+    path names a different file.
+    """
+    new = path.with_suffix(".new")
+    new.write_text(body, encoding="utf-8")
+    os.replace(new, path)
+
+
+def _rewrite_keeping_times(path: Path, body: str) -> None:
+    """
+    Rewrite a file at the same size and put its times back, like `cp -p` or `touch -r`
+    does, so that only its change time tells. Write until that's moved on, in case the
+    clock is too coarse to tell this write from the last.
+    """
+    before = path.stat()
+
+    while path.stat().st_ctime_ns == before.st_ctime_ns:
+        path.write_text(body, encoding="utf-8")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+
+def _watching(
+    monkeypatch: MonkeyPatch,
+    *steps: Callable[[], object],
+) -> list[tuple[tuple[str, ...], dict[str, object]]]:
+    """
+    Replace watchfiles' `watch` with a fake that takes the next step at each wake,
+    rather than waiting for a change, and return the paths and options that each watch
+    started with. No time passes. A step that returns a set wakes with those events,
+    and any other wakes with none.
+
+    Like watchfiles, a watch starts at its first wake, so a step that raises there, like
+    `FileNotFoundError` for a missing path, fails the start. A watch that restarts
+    carries on with the next step. Once every step is taken, the next wake raises
+    `KeyboardInterrupt`, like Ctrl+C.
+
+    Platen starts a new watch after every press, so a watch that keeps being created
+    without waking means that every press causes another, forever. That fails the test,
+    rather than hanging it.
+    """
+    created = count()
+    started: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    remaining = iter(steps)
+
+    def wakes(
+        paths: tuple[str, ...],
+        options: dict[str, object],
+    ) -> Iterator[set[object]]:
+        started.append((paths, options))
+
+        for step in remaining:
+            events = step()
+            yield cast(set[object], events) if isinstance(events, set) else set()
+
+        raise KeyboardInterrupt
+
+    def watch(*paths: str, **options: object) -> Iterator[set[object]]:
+        # Each step can cause a press, a restart, or both, and the first watch starts
+        # after the first press.
+        if next(created) > 2 * len(steps) + 2:
+            fail("Platen kept pressing without being woken")
+
+        return wakes(paths, options)
+
+    monkeypatch.setattr("watchfiles.watch", watch)
+    return started
 
 
 @fixture
@@ -64,15 +186,17 @@ def project(monkeypatch: MonkeyPatch, tmp_path: Path) -> Path:
 def test_console_script_runs_main() -> None:
     """The `platen` console script must run `platen.cli.main`."""
     (script,) = entry_points(group="console_scripts", name="platen")
-    assert script.load() is main
+    result = script.load()
+
+    assert result is main
 
 
 def test_help(capsys: CaptureFixture[str], monkeypatch: MonkeyPatch) -> None:
     """
-    `--help` must print usage to stdout, naming both of the template's options, and
-    exit with 0.
+    `--help` must print usage to stdout, naming both of the template's options and
+    `--watch`, and exit with 0.
     """
-    # argparse wraps its usage to the terminal's width, and `USAGE` is one line.
+    # argparse wraps its usage to the terminal's width, and `USAGE` is 80 columns.
     monkeypatch.setenv("COLUMNS", "80")
 
     # Python 3.14's argparse colours its output when the environment asks for colour.
@@ -90,6 +214,7 @@ def test_help(capsys: CaptureFixture[str], monkeypatch: MonkeyPatch) -> None:
     captured = capsys.readouterr()
     assert captured.out.startswith(USAGE)
     assert "\n  --template, --templates PATH\n" in captured.out
+    assert "\n  --watch " in captured.out
     assert captured.err == ""
 
 
@@ -100,16 +225,9 @@ def test_help(capsys: CaptureFixture[str], monkeypatch: MonkeyPatch) -> None:
         "templates/",
         "./templates",
         "{cwd}/templates",
+        # A symlink to `templates`, which the test creates beside it.
         "link",
         "templates/sub/..",
-    ],
-    ids=[
-        "relative",
-        "trailing separator",
-        "leading dot",
-        "absolute",
-        "symlink",
-        "parent directory",
     ],
 )
 def test_presses_directory(
@@ -165,12 +283,13 @@ def test_presses_directory(
         for path in build.rglob("*")
         if path.is_file()
     }
-
-    assert pressed == {
+    expect = {
         Path("_badge.txt"): b"Badge: passing\n",
         Path("index.md"): b"# platen\n\nBadge: passing\n",
         Path("sub/page.md"): b"Badge: passing\n",
     }
+
+    assert pressed == expect
 
 
 def test_presses_empty_values(capsys: CaptureFixture[str], project: Path) -> None:
@@ -190,8 +309,13 @@ def test_presses_empty_values(capsys: CaptureFixture[str], project: Path) -> Non
     )
 
     assert exit_code == 0
-    assert capsys.readouterr().err == ""
-    assert (project / "doc.md").read_text(encoding="utf-8") == "Hello, world!\n"
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+    result = (project / "doc.md").read_text(encoding="utf-8")
+
+    assert result == "Hello, world!\n"
 
 
 def test_presses_readme_next_to_template(
@@ -243,7 +367,9 @@ def test_presses_symlink_to_template_within_directory(
     )
 
     assert exit_code == 0
-    assert capsys.readouterr().err == ""
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
 
     pressed = (project / "README.md").read_text(encoding="utf-8")
     assert pressed == "# platen\n\nBuild: passing\n"
@@ -274,7 +400,9 @@ def test_presses_template_in_subdirectory(
     )
 
     assert exit_code == 0
-    assert capsys.readouterr().err == ""
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
 
     pressed = (project / "build" / "site" / "index.md").read_text(encoding="utf-8")
     assert pressed == "Hello from platen\n"
@@ -283,6 +411,8 @@ def test_presses_template_in_subdirectory(
 @mark.parametrize(
     ("ignore", "expect"),
     [
+        # Without a `.platenignore` file, the values file is pressed like any other
+        # template, so its own `{{ name }}` is rendered.
         (
             None,
             {
@@ -296,10 +426,6 @@ def test_presses_template_in_subdirectory(
                 Path("index.md"): b"# platen\n",
             },
         ),
-    ],
-    ids=[
-        "pressed",
-        "ignored",
     ],
 )
 def test_presses_values_file_within_directory(
@@ -336,7 +462,9 @@ def test_presses_values_file_within_directory(
     )
 
     assert exit_code == 0
-    assert capsys.readouterr().err == ""
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
 
     build = project / "build"
 
@@ -387,10 +515,6 @@ def test_presses_values_that_reuse_anchor(
         ("--template", "docs", "build"),
         ("--templates", "docs/page.md", "build/page.md"),
     ],
-    ids=[
-        "template directory",
-        "templates file",
-    ],
 )
 def test_presses_with_either_template_option(
     option: str,
@@ -415,7 +539,9 @@ def test_presses_with_either_template_option(
     )
 
     assert exit_code == 0
-    assert capsys.readouterr().err == ""
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
 
     pressed = (project / "build" / "page.md").read_text(encoding="utf-8")
     assert pressed == "# platen\n"
@@ -438,7 +564,50 @@ def test_presses_with_options_in_any_order(
     )
 
     assert exit_code == 0
-    assert capsys.readouterr().err == ""
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+    pressed = (project / "README.md").read_text(encoding="utf-8")
+    assert pressed == "# platen\n\nBuild: passing\n"
+
+
+def test_presses_without_importing_watchfiles(project: Path) -> None:
+    """
+    A press without `--watch` must never import watchfiles, or the anyio that it
+    imports, which would slow down every press.
+    """
+    # Only a fresh interpreter shows what a press imports, because this one imports
+    # watchfiles for other tests.
+    script = (
+        "import sys\n"
+        "from platen.cli import main\n"
+        "exit_code = main()\n"
+        "imported = {'anyio', 'watchfiles'} & sys.modules.keys()\n"
+        "sys.exit(99 if imported else exit_code)\n"
+    )
+
+    result = run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+        ],
+        capture_output=True,
+        check=False,
+        cwd=project,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
 
     pressed = (project / "README.md").read_text(encoding="utf-8")
     assert pressed == "# platen\n\nBuild: passing\n"
@@ -570,8 +739,14 @@ def test_refuses_directory_template_after_pressing_others(
     )
 
     build = project / "build"
-    assert [path.relative_to(build) for path in build.rglob("*")] == [Path("a.md")]
-    assert (build / "a.md").read_bytes() == b"A\n"
+    result = [path.relative_to(build) for path in build.rglob("*")]
+    expect = [Path("a.md")]
+
+    assert result == expect
+
+    result = (build / "a.md").read_bytes()
+
+    assert result == b"A\n"
 
 
 def test_refuses_directory_that_cannot_be_read(
@@ -582,15 +757,15 @@ def test_refuses_directory_that_cannot_be_read(
     A directory that can't be listed must be refused, naming it absolutely, before
     anything is pressed.
     """
+    if not can_chmod_deny_listing(project):
+        skip("Permissions don't stop this user from reading directories")
+
     directory = project / "templates"
     directory.mkdir()
     (directory / "a.md").write_text("A\n", encoding="utf-8")
     directory.chmod(0o300)
 
     try:
-        if access(directory, R_OK):
-            skip("Permissions don't stop this user from reading directories")
-
         # `_assert_fails` can't snapshot a directory that can't be read.
         exit_code = main(
             [
@@ -626,22 +801,19 @@ def test_refuses_directory_that_cannot_be_read(
             "/dev/null",
             "Template '{templates}/null.md' can't be pressed: it isn't a regular file",
         ),
+        # A symlink to a FIFO, which the test makes beside the templates directory.
         (
             "pipe",
             "../fifo",
             "Template '{templates}/pipe' can't be pressed: it isn't a regular file",
         ),
+        # A walk never steps into a symlink, even to a directory like `sub`, so it's
+        # taken as a template.
         (
             "linked",
             "sub",
             "Template '{templates}/linked' can't be pressed: it isn't a regular file",
         ),
-    ],
-    ids=[
-        "broken",
-        "to device",
-        "to fifo",
-        "to directory",
     ],
 )
 def test_refuses_directory_with_symlink_that_cannot_be_pressed(
@@ -695,14 +867,14 @@ def test_refuses_output_in_directory_that_cannot_be_written(
     An output in a directory that can't be written must be refused, naming the output
     as it was given.
     """
+    if not can_chmod_deny_writing(project):
+        skip("Permissions don't stop this user from writing files")
+
     directory = project / "ro"
     directory.mkdir()
     directory.chmod(0o555)
 
     try:
-        if access(directory, W_OK):
-            skip("Permissions don't stop this user from writing files")
-
         _assert_fails(
             capsys,
             project,
@@ -747,17 +919,14 @@ def test_refuses_output_that_cannot_be_written(
     [
         (OSError(EIO, strerror(EIO)), strerror(EIO)),
         (OSError(EIO, strerror(EIO), "out.md"), f"{strerror(EIO)}: 'out.md'"),
+        # An error that names two paths, like a failed rename. The `None` is the
+        # Windows error code, which `OSError` takes before the second path.
         (
             OSError(EIO, strerror(EIO), "README.template", None, "out.md"),
             f"{strerror(EIO)}: 'README.template' -> 'out.md'",
         ),
+        # An error that the operating system didn't describe is named by its type.
         (OSError("Disk on fire"), "OSError: Disk on fire"),
-    ],
-    ids=[
-        "names no paths",
-        "names one path",
-        "names two paths",
-        "not described",
     ],
 )
 def test_refuses_output_that_fails_to_write(
@@ -909,14 +1078,11 @@ def test_refuses_template_error_without_file(
             "missing.template",
             "No such file or directory: 'missing.template'",
         ),
+        # `README.template` is there, but the trailing separator asks for a directory.
         (
             "README.template/",
             "Not a directory: 'README.template/'",
         ),
-    ],
-    ids=[
-        "missing",
-        "trailing separator",
     ],
 )
 def test_refuses_template_that_cannot_be_found(
@@ -989,6 +1155,8 @@ def test_refuses_template_that_cannot_be_read(
             {"page.template": "Hello\n{{ missing }}\n"},
             "'missing' is undefined ({docs}/page.template, line 2)",
         ),
+        # Reading an attribute of an undefined value fails in the include, so the
+        # include is named, rather than the template that includes it.
         (
             {
                 "page.template": 'Hello\n\n{% include "_part.txt" %}\n',
@@ -1008,6 +1176,7 @@ def test_refuses_template_that_cannot_be_read(
             },
             "Encountered unknown tag 'endif'. ({docs}/_part.txt, line 3)",
         ),
+        # Jinja names an unclosed comment's file only in the error, not its traceback.
         (
             {
                 "page.template": 'Hello\n{% include "_part.txt" %}\n',
@@ -1019,25 +1188,18 @@ def test_refuses_template_that_cannot_be_read(
             {"page.template": 'Hello\n{% include "_missing.txt" %}\n'},
             "Template '_missing.txt' not found ({docs}/page.template, line 2)",
         ),
+        # When none of a list of includes are found, Jinja raises `TemplatesNotFound`,
+        # whose own message names only the includes, so it's kept.
         (
             {"page.template": 'Hello\n{% include ["_a.txt", "_b.txt"] %}\n'},
             "none of the templates given were found: _a.txt, _b.txt "
             "({docs}/page.template, line 2)",
         ),
+        # Python's own error, rather than Jinja's, is named by its type.
         (
             {"page.template": "Hello\n{{ 1 / 0 }}\n"},
             "ZeroDivisionError: division by zero ({docs}/page.template, line 2)",
         ),
-    ],
-    ids=[
-        "undefined",
-        "undefined in include",
-        "syntax error",
-        "syntax error in include",
-        "unclosed comment in include",
-        "missing include",
-        "missing includes",
-        "python error",
     ],
 )
 def test_refuses_template_that_cannot_be_rendered(
@@ -1156,19 +1318,18 @@ def test_refuses_template_that_leads_outside_directory(
 @mark.parametrize(
     ("body", "message"),
     [
+        # A list isn't a mapping, and that error quotes the name like `repr` does, in
+        # double quotes because of its `'`.
         (
             "- platen\n",
             'Values file "it\'s\\nvalues.yaml" must hold a mapping of names to values',
         ),
+        # A YAML syntax error names the file unquoted, beside the line and column.
         (
             "name: platen: x\n",
             "mapping values are not allowed here "
             "(it's\\nvalues.yaml, line 1, column 13)",
         ),
-    ],
-    ids=[
-        "quoted",
-        "unquoted",
     ],
 )
 def test_refuses_values_named_with_line_break(
@@ -1204,13 +1365,8 @@ def test_refuses_values_named_with_line_break(
         "- platen\n",
         "platen\n",
         "42\n",
+        # YAML reads this as a date, rather than a string.
         "2026-10-08\n",
-    ],
-    ids=[
-        "list",
-        "string",
-        "number",
-        "date",
     ],
 )
 def test_refuses_values_that_are_not_mapping(
@@ -1253,28 +1409,25 @@ def test_refuses_values_that_are_not_mapping(
             "expected a single document in the stream, but found another document "
             "(values.yaml, line 2, column 1)",
         ),
+        # YAML doesn't allow a tab to indent.
         (
             b"name:\n\tstatus: passing\n",
             "while scanning for the next token, found character '\\t' that cannot "
             "start any token (values.yaml, line 2, column 1)",
         ),
+        # ruamel.yaml doesn't mark the line of a byte that isn't UTF-8, so its own
+        # description, with a position, is given instead.
         (
             b"name: \xff\n",
             "unacceptable character #x00ff: invalid start byte "
             'in "values.yaml", position 6',
         ),
+        # ruamel.yaml asserts a document's YAML version, rather than raising an error
+        # that says where, so only the file is named.
         (
             b"%YAML 1.3\n---\nname: platen\n",
             "version minor part can only be 2 or 1, got (1, 3) (values.yaml)",
         ),
-    ],
-    ids=[
-        "syntax error",
-        "duplicate key",
-        "multiple documents",
-        "tab",
-        "not utf-8",
-        "unsupported version",
     ],
 )
 def test_refuses_values_that_are_not_valid(
@@ -1308,11 +1461,6 @@ def test_refuses_values_that_are_not_valid(
         ("{cwd}/missing.yaml", "No such file or directory: '{cwd}/missing.yaml'"),
         ("docs", "Is a directory: 'docs'"),
     ],
-    ids=[
-        "missing",
-        "missing absolute",
-        "directory",
-    ],
 )
 def test_refuses_values_that_cannot_be_read(
     values: str,
@@ -1345,11 +1493,8 @@ def test_refuses_values_that_cannot_be_read(
     ("body", "key"),
     [
         ("1: one\n", "1"),
+        # YAML reads `true` as a boolean, and the key is named as Python shows it.
         ("true: one\n", "True"),
-    ],
-    ids=[
-        "number",
-        "boolean",
     ],
 )
 def test_refuses_values_with_keys_that_are_not_strings(
@@ -1384,6 +1529,7 @@ def test_refuses_values_with_keys_that_are_not_strings(
             "the following arguments are required: --template/--templates, --values, "
             "--out",
         ),
+        # The paths without their options, as Platen's arguments were once given.
         (
             [
                 "README.template",
@@ -1430,6 +1576,7 @@ def test_refuses_values_with_keys_that_are_not_strings(
             ],
             "argument --out: expected one argument",
         ),
+        # Prefixes of options aren't accepted, so `--values` is still missing.
         (
             [
                 "--template",
@@ -1465,6 +1612,18 @@ def test_refuses_values_with_keys_that_are_not_strings(
             ],
             "unrecognized arguments: extra",
         ),
+        (
+            [
+                "--template",
+                "README.template",
+                "--values",
+                "values.yaml",
+                "--out",
+                "README.md",
+                "--watch=yes",
+            ],
+            "argument --watch: ignored explicit argument 'yes'",
+        ),
     ],
 )
 def test_refuses_wrong_arguments(
@@ -1475,10 +1634,10 @@ def test_refuses_wrong_arguments(
     project: Path,
 ) -> None:
     """
-    The wrong number of arguments must print usage and an error to stderr, exit with 2,
-    and write nothing.
+    The wrong number of arguments, or a value given to `--watch`, must print usage and
+    an error to stderr, exit with 2, and write nothing.
     """
-    # argparse wraps its usage to the terminal's width, and `USAGE` is one line.
+    # argparse wraps its usage to the terminal's width, and `USAGE` is 80 columns.
     monkeypatch.setenv("COLUMNS", "80")
 
     # Python 3.14's argparse colours its output when the environment asks for colour.
@@ -1494,7 +1653,10 @@ def test_refuses_wrong_arguments(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == f"{USAGE}platen: error: {message}\n"
-    assert snapshot(project) == before
+
+    result = snapshot(project)
+
+    assert result == before
 
 
 @mark.parametrize(
@@ -1510,10 +1672,6 @@ def test_refuses_wrong_arguments(
             "README.template",
             "press_file",
         ),
-    ],
-    ids=[
-        "directory",
-        "file",
     ],
 )
 def test_stops_quietly_when_interrupted(
@@ -1603,11 +1761,6 @@ def test_version_without_metadata(
         ("docs/", {}),
         ("docs", {".platenignore": "*.md\n", "page.md": "Hello\n"}),
     ],
-    ids=[
-        "empty",
-        "trailing separator",
-        "everything ignored",
-    ],
 )
 def test_warns_when_directory_has_nothing_to_press(
     template: str,
@@ -1647,4 +1800,2020 @@ def test_warns_when_directory_has_nothing_to_press(
         "everything in it is ignored\n"
     )
 
-    assert snapshot(project) == before
+    result = snapshot(project)
+
+    assert result == before
+
+
+@mark.parametrize(
+    "error",
+    [
+        PermissionError("Permission denied (os error 13)"),
+        OSError(
+            'OS file watch limit reached. about ["/docs"] '
+            '(Error { kind: MaxFilesWatch, paths: ["/docs"] })',
+        ),
+    ],
+)
+def test_watch_fails_when_changes_cannot_be_watched(
+    error: Exception,
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must stop with exit code 1 when watchfiles can't watch for
+    changes, like when permissions deny it or the operating system's limit is reached,
+    printing watchfiles' own description of the error after the press.
+    """
+
+    def fail() -> None:
+        raise error
+
+    _watching(
+        monkeypatch,
+        fail,
+    )
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+    assert captured.err == (
+        f"{PRESSED_FILE}{WATCHING}platen: error: Can't watch for changes: {error}\n"
+    )
+
+    pressed = (project / "README.md").read_bytes()
+    assert pressed == b"# platen\n\nBuild: passing\n"
+
+
+def test_watch_fails_when_working_directory_is_deleted(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must stop with exit code 1 when the working directory is deleted
+    while it watches, because the relative paths that it watches lead nowhere.
+    """
+    working_dir = project / "gone"
+    working_dir.mkdir()
+    monkeypatch.chdir(working_dir)
+
+    # The project directory holds the template, so it's watched, and its watcher says
+    # that the working directory within it was deleted.
+    deleted = realpath(working_dir)
+
+    def delete() -> set[tuple[Change, str]]:
+        working_dir.rmdir()
+        return {(Change.deleted, deleted)}
+
+    _watching(monkeypatch, delete)
+
+    exit_code = main(
+        [
+            "--template",
+            "../README.template",
+            "--values",
+            "../values.yaml",
+            "--out",
+            "../README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+    assert captured.err == (
+        "platen: Pressed '../README.template' to '../README.md'\n"
+        f"{WATCHING}"
+        "platen: error: The working directory no longer exists, so changes can't be "
+        "watched\n"
+    )
+
+    pressed = (project / "README.md").read_bytes()
+    assert pressed == b"# platen\n\nBuild: passing\n"
+
+
+def test_watch_finds_directories_again_after_waiting_when_watchers_keep_failing(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must wait 5 seconds before finding the directories to watch again
+    when a watcher that replaced one that couldn't find a directory can't find one
+    either, so that watchers can't start as fast as they fail.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr("platen.cli.sleep", sleeps.append)
+
+    def fail() -> None:
+        raise FileNotFoundError("No such file or directory (os error 2)")
+
+    started = _watching(
+        monkeypatch,
+        fail,
+        fail,
+        lambda: None,
+    )
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_FILE}{WATCHING}"
+
+    root = realpath(project)
+    result = [paths for paths, _ in started]
+
+    assert result == [
+        (root,),
+        (root,),
+        (root,),
+    ]
+
+    # The first watcher replaced none, so only the second waited.
+    assert sleeps == [5]
+
+
+def test_watch_finds_directories_again_when_one_disappears(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must find the directories to watch again, rather than fail, when
+    one disappears after it's found but before watching starts, like during a checkout.
+    """
+    templates = project / "templates"
+    (templates / "sub").mkdir(parents=True)
+    (templates / "index.md").write_text("# {{ name }}\n", encoding="utf-8")
+
+    def disappear() -> None:
+        (templates / "sub").rmdir()
+
+        # watchfiles raises this as it starts, for a path that's missing.
+        raise FileNotFoundError("No such file or directory (os error 2)")
+
+    started = _watching(monkeypatch, disappear)
+
+    exit_code = main(
+        [
+            "--templates",
+            "templates",
+            "--values",
+            "values.yaml",
+            "--out",
+            "build",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_DIRECTORY}{WATCHING}"
+
+    root = realpath(project)
+    result = [paths for paths, _ in started]
+
+    assert result == [
+        (root, f"{root}/templates", f"{root}/templates/sub"),
+        (root, f"{root}/templates"),
+    ]
+
+    result = (project / "build" / "index.md").read_bytes()
+
+    assert result == b"# platen\n"
+
+
+@mark.parametrize(
+    ("template", "output", "files", "change"),
+    [
+        # The output is beside its template, in a watched directory, but isn't read.
+        (
+            "README.template",
+            "README.md",
+            {},
+            lambda: edit(Path("README.md"), "Edited\n"),
+        ),
+        (
+            "README.template",
+            "README.md",
+            {},
+            lambda: Path("README.md").unlink(),
+        ),
+        (
+            "README.template",
+            "README.md",
+            {},
+            lambda: Path("notes.txt").write_text("Notes\n", encoding="utf-8"),
+        ),
+        (
+            "templates",
+            "build",
+            {
+                "templates/.platenignore": "*.log\n",
+                "templates/index.md": "# {{ name }}\n",
+                "templates/notes.log": "Notes\n",
+            },
+            lambda: edit(Path("templates/notes.log"), "Edited\n"),
+        ),
+        # `.platenignore` matters only for what the walk finds, which a comment added
+        # to it doesn't change.
+        (
+            "templates",
+            "build",
+            {
+                "templates/.platenignore": "*.log\n",
+                "templates/index.md": "# {{ name }}\n",
+                "templates/notes.log": "Notes\n",
+            },
+            lambda: edit(Path("templates/.platenignore"), "# Logs\n*.log\n"),
+        ),
+        # An include named with a null character, which `ignore missing` skips.
+        (
+            "README.template",
+            "README.md",
+            {
+                "README.template": "# {{ name }}\n{% include part ignore missing %}",
+                "values.yaml": 'name: platen\npart: "_\\0.txt"\n',
+            },
+            # Nothing can ever be found at a path that holds a null character, so
+            # nothing can change it.
+            lambda: None,
+        ),
+    ],
+)
+def test_watch_ignores_files_that_press_does_not_read(
+    template: str,
+    output: str,
+    files: dict[str, str],
+    change: Callable[[], object],
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must not press again when a file changes that the last press
+    didn't read, even beside the template, like the press's own output, an ignored
+    file, or a comment in a `.platenignore` file, or for an include that can never be
+    found.
+    """
+    _create(project, files)
+    changed: list[dict[Path, tuple[bytes, int] | None]] = []
+
+    def change_and_snapshot() -> None:
+        change()
+        changed.append(snapshot(project))
+
+    _watching(monkeypatch, change_and_snapshot)
+
+    exit_code = main(
+        [
+            "--template",
+            template,
+            "--values",
+            "values.yaml",
+            "--out",
+            output,
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"platen: Pressed '{template}' to '{output}'\n{WATCHING}"
+
+    # Nothing was written after the change.
+    expect = [snapshot(project)]
+
+    assert changed == expect
+
+
+@mark.parametrize(
+    ("template", "output", "files", "links", "included", "expect"),
+    [
+        # The template includes its own output, so every press changes what it read.
+        (
+            "README.template",
+            "README.md",
+            {
+                "README.template": (
+                    '# {{ name }}\n{% include "README.md" ignore missing %}'
+                ),
+            },
+            {},
+            "README.md",
+            b"# other\n# platen\n",
+        ),
+        # `build/index.md` is a symlink to `_part.txt`, which the template `index.md`
+        # includes, so every press writes to an include.
+        (
+            "templates",
+            "build",
+            {
+                "templates/.platenignore": "_*\n",
+                "templates/_part.txt": "Part\n",
+                "templates/index.md": '{{ name }}: {% include "_part.txt" %}',
+            },
+            {"build/index.md": "../templates/_part.txt"},
+            "templates/_part.txt",
+            b"other: platen: Part\n",
+        ),
+    ],
+)
+def test_watch_ignores_output_that_template_includes(
+    template: str,
+    output: str,
+    files: dict[str, str],
+    links: dict[str, str],
+    included: str,
+    expect: bytes,
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must not watch a template that a press writes to, like an output
+    that the template includes, or a template that a symlink within the output leads
+    to, or every press would cause another, forever.
+    """
+    _create(project, files, links)
+    _watching(
+        monkeypatch,
+        lambda: edit(project / "values.yaml", "name: other\nstatus: passing\n"),
+    )
+
+    exit_code = main(
+        [
+            "--template",
+            template,
+            "--values",
+            "values.yaml",
+            "--out",
+            output,
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    pressed = f"platen: Pressed '{template}' to '{output}'\n"
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{pressed}{WATCHING}{pressed}"
+
+    result = (project / included).read_bytes()
+
+    assert result == expect
+
+
+def test_watch_ignores_output_that_template_includes_when_press_fails(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must not watch a template that a press wrote to even when the
+    press failed after writing it, or every press would cause another, forever.
+    """
+    _create(
+        project,
+        {
+            "templates/.platenignore": "_*\n",
+            "templates/_part.txt": "Part\n",
+            "templates/a.md": '{% include "_part.txt" %}',
+            # The walk finds `b.md` after `a.md`, so the press fails after writing.
+            "templates/b.md": "{{ missing }}\n",
+        },
+        {"build/a.md": "../templates/_part.txt"},
+    )
+
+    _watching(monkeypatch)
+
+    exit_code = main(
+        [
+            "--templates",
+            "templates",
+            "--values",
+            "values.yaml",
+            "--out",
+            "build",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    templates = realpath(project / "templates")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+    assert captured.err == (
+        f"platen: error: 'missing' is undefined ({templates}/b.md, line 1)\n{WATCHING}"
+    )
+
+    result = (project / "templates" / "_part.txt").read_bytes()
+
+    assert result == b"Part\n"
+
+
+@mark.parametrize(
+    ("change", "name"),
+    [
+        # Polling sees what's in a watched directory change.
+        (Change.modified, "parts"),
+        (Change.added, "parts/other.txt"),
+        (Change.deleted, "parts/other.txt"),
+    ],
+)
+def test_watch_keeps_watcher_when_event_does_not_replace_directory(
+    change: Change,
+    name: str,
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must keep its watcher when an event names anything but a watched
+    directory that was deleted or added, like a file within one, or a watched directory
+    that was modified, rather than start a new one at every wake.
+    """
+    _create(
+        project,
+        {
+            "README.template": (
+                '# {{ name }}\n{% include "parts/_part.txt" ignore missing %}'
+            ),
+        },
+    )
+
+    (project / "parts").mkdir()
+
+    started = _watching(
+        monkeypatch,
+        lambda: {(change, realpath(project / name))},
+    )
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_FILE}{WATCHING}"
+
+    root = realpath(project)
+    result = [paths for paths, _ in started]
+
+    assert result == [
+        (root, f"{root}/parts"),
+    ]
+
+
+@mark.parametrize(
+    ("files", "links", "hidden", "fix", "message"),
+    [
+        (
+            {"_badge.txt": "Build: {{ missing }}\n"},
+            {},
+            [],
+            lambda: edit(Path("_badge.txt"), "Build: {{ status }}\n"),
+            "'missing' is undefined ({project}/_badge.txt, line 1)",
+        ),
+        (
+            {"_badge.txt": "Build: {% if %}\n"},
+            {},
+            [],
+            lambda: edit(Path("_badge.txt"), "Build: {{ status }}\n"),
+            "Expected an expression, got 'end of statement block' "
+            "({project}/_badge.txt, line 1)",
+        ),
+        # A symlink that leads back to itself, so nothing can be found there.
+        (
+            {"_badge.new": "Build: {{ status }}\n"},
+            {"_badge.txt": "_badge.txt"},
+            [],
+            lambda: os.replace("_badge.new", "_badge.txt"),
+            "Template '_badge.txt' not found ({project}/README.template, line 3)",
+        ),
+        # The include is in `private`, which can't be read until the fix.
+        (
+            {
+                "README.template": (
+                    '# {{ name }}\n\n{% include "private/_badge.txt" %}\n'
+                ),
+                "private/_badge.txt": "Build: {{ status }}\n",
+            },
+            {},
+            ["private"],
+            lambda: Path("private").chmod(0o755),
+            "Template 'private/_badge.txt' not found "
+            "({project}/README.template, line 3)",
+        ),
+    ],
+)
+def test_watch_keeps_watching_after_press_fails(
+    files: dict[str, str],
+    links: dict[str, str],
+    hidden: list[str],
+    fix: Callable[[], object],
+    message: str,
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must keep watching when a press fails, printing the error as a
+    press without `--watch` does, and press again once the template is fixed, like an
+    include that can't be rendered, loops, or is in a directory that can't be read.
+    """
+    if hidden and not can_chmod_deny_search(project):
+        skip("Permissions don't stop this user from searching directories")
+
+    _create(project, files, links)
+
+    for name in hidden:
+        (project / name).chmod(0)
+
+    try:
+        _watching(monkeypatch, fix)
+
+        exit_code = main(
+            [
+                "--template",
+                "README.template",
+                "--values",
+                "values.yaml",
+                "--out",
+                "README.md",
+                "--watch",
+            ],
+        )
+
+        assert exit_code == 130
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+        assert captured.err == (
+            f"platen: error: {message.format(project=realpath(project))}\n"
+            f"{WATCHING}{PRESSED_FILE}"
+        )
+
+        pressed = (project / "README.md").read_bytes()
+        assert pressed == b"# platen\n\nBuild: passing\n"
+
+    finally:
+        for name in hidden:
+            (project / name).chmod(0o755)
+
+
+def test_watch_presses_again_after_change_made_while_pressing(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must press again straight away, rather than wait to be woken, when
+    the values change during a press, after the press read them.
+    """
+    press_file = Platen.press_file
+    presses = count(1)
+
+    def press_file_then_change_values(
+        self: Platen,
+        template: PathLike[str] | str,
+        destination: PathLike[str] | str,
+    ) -> None:
+        press_file(self, template, destination)
+
+        # Only change the values during the press that the wake starts, which has read
+        # them by now.
+        if next(presses) == 2:
+            edit(project / "values.yaml", "name: during\nstatus: passing\n")
+
+    monkeypatch.setattr("platen.cli.Platen.press_file", press_file_then_change_values)
+
+    _watching(
+        monkeypatch,
+        lambda: edit(project / "values.yaml", "name: before\nstatus: passing\n"),
+    )
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_FILE}{WATCHING}{PRESSED_FILE}{PRESSED_FILE}"
+
+    pressed = (project / "README.md").read_bytes()
+    assert pressed == b"# during\n\nBuild: passing\n"
+
+
+def test_watch_presses_again_after_include_changes_between_templates(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must press again straight away when an include changes after a
+    directory press pressed one template that includes it, but before it pressed
+    another, which reads the include again, because the first template's output still
+    has the include as it was.
+    """
+    _create(
+        project,
+        {
+            "templates/.platenignore": "_*\n",
+            "templates/_badge.txt": "Build: {{ status }}\n",
+            "templates/a.md": '{% include "_badge.txt" %}',
+            "templates/b.md": '{% include "_badge.txt" %}',
+        },
+    )
+
+    copies = count(1)
+
+    def copymode_then_change_include(
+        source: PathLike[str] | str,
+        destination: PathLike[str] | str,
+    ) -> None:
+        copymode(source, destination)
+
+        # Only change the include once `a.md` is pressed, during the first press, so
+        # that Jinja reads it again for `b.md`.
+        if next(copies) == 1:
+            edit(project / "templates" / "_badge.txt", "Build: {{ status }}!\n")
+
+    monkeypatch.setattr("platen.platen.copymode", copymode_then_change_include)
+
+    _watching(monkeypatch)
+
+    exit_code = main(
+        [
+            "--templates",
+            "templates",
+            "--values",
+            "values.yaml",
+            "--out",
+            "build",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_DIRECTORY}{WATCHING}{PRESSED_DIRECTORY}"
+
+    pressed = (project / "build" / "a.md").read_bytes()
+    assert pressed == b"Build: passing!\n"
+
+
+def test_watch_presses_again_after_include_changes_while_pressing(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must press again straight away, rather than wait to be woken, when
+    an include changes during the first press, after the press read it, even though it
+    wasn't looked at before the press.
+    """
+    press_file = Platen.press_file
+    presses = count(1)
+
+    def press_file_then_change_include(
+        self: Platen,
+        template: PathLike[str] | str,
+        destination: PathLike[str] | str,
+    ) -> None:
+        press_file(self, template, destination)
+
+        # Only change the include during the first press, which has read it by now.
+        if next(presses) == 1:
+            edit(project / "_badge.txt", "Build: {{ status }}!\n")
+
+    monkeypatch.setattr("platen.cli.Platen.press_file", press_file_then_change_include)
+
+    _watching(monkeypatch)
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_FILE}{WATCHING}{PRESSED_FILE}"
+
+    pressed = (project / "README.md").read_bytes()
+    assert pressed == b"# platen\n\nBuild: passing!\n"
+
+
+@mark.parametrize(
+    ("files", "first", "change", "expect"),
+    [
+        (
+            {},
+            PRESSED_DIRECTORY,
+            lambda: Path("templates/new.md").write_text("New\n", encoding="utf-8"),
+            {
+                Path("index.md"): b"# platen\n\nBuild: passing\n",
+                Path("new.md"): b"New\n",
+            },
+        ),
+        # A deleted template's output is left behind.
+        (
+            {"templates/old.md": "Old\n"},
+            PRESSED_DIRECTORY,
+            lambda: Path("templates/old.md").unlink(),
+            {
+                Path("index.md"): b"# platen\n\nBuild: passing\n",
+                Path("old.md"): b"Old\n",
+            },
+        ),
+        # A renamed template's old output is left behind.
+        (
+            {"templates/old.md": "Old\n"},
+            PRESSED_DIRECTORY,
+            lambda: Path("templates/old.md").rename("templates/new.md"),
+            {
+                Path("index.md"): b"# platen\n\nBuild: passing\n",
+                Path("new.md"): b"Old\n",
+                Path("old.md"): b"Old\n",
+            },
+        ),
+        (
+            {},
+            PRESSED_DIRECTORY,
+            lambda: edit(
+                Path("templates/index.md"),
+                '# {{ name }}!\n\n{% include "_badge.txt" %}\n',
+            ),
+            {
+                Path("index.md"): b"# platen!\n\nBuild: passing\n",
+            },
+        ),
+        (
+            {},
+            PRESSED_DIRECTORY,
+            lambda: edit(Path("values.yaml"), "name: other\nstatus: passing\n"),
+            {
+                Path("index.md"): b"# other\n\nBuild: passing\n",
+            },
+        ),
+        # `_badge.txt` is ignored, but `index.md` includes it.
+        (
+            {},
+            PRESSED_DIRECTORY,
+            lambda: edit(Path("templates/_badge.txt"), "Build: {{ status }}!\n"),
+            {
+                Path("index.md"): b"# platen\n\nBuild: passing!\n",
+            },
+        ),
+        # A negated pattern stops ignoring `_badge.txt`, so it's pressed itself too.
+        (
+            {},
+            PRESSED_DIRECTORY,
+            lambda: edit(Path("templates/.platenignore"), "_*\n!_badge.txt\n"),
+            {
+                Path("_badge.txt"): b"Build: passing\n",
+                Path("index.md"): b"# platen\n\nBuild: passing\n",
+            },
+        ),
+        # The first press fails on `broken.md`, until `.platenignore` ignores it.
+        (
+            # The walk finds `broken.md` first, so the press fails before `index.md`.
+            {"templates/broken.md": "{{ missing }}\n"},
+            "platen: error: 'missing' is undefined ({templates}/broken.md, line 1)\n",
+            lambda: edit(Path("templates/.platenignore"), "_*\nbroken.md\n"),
+            {
+                Path("index.md"): b"# platen\n\nBuild: passing\n",
+            },
+        ),
+    ],
+)
+def test_watch_presses_again_when_directory_changes(
+    files: dict[str, str],
+    first: str,
+    change: Callable[[], object],
+    expect: dict[Path, bytes],
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must press a directory again when the templates that a walk finds
+    change, even when only their names do, or when the values or an ignored template
+    that one includes changes, leaving the outputs of templates that are gone.
+    """
+    templates = project / "templates"
+
+    _create(
+        project,
+        {
+            "templates/.platenignore": "_*\n",
+            "templates/_badge.txt": "Build: {{ status }}\n",
+            "templates/index.md": '# {{ name }}\n\n{% include "_badge.txt" %}\n',
+            **files,
+        },
+    )
+
+    _watching(monkeypatch, change)
+
+    exit_code = main(
+        [
+            "--templates",
+            "templates",
+            "--values",
+            "values.yaml",
+            "--out",
+            "build",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+    assert captured.err == (
+        f"{first.format(templates=realpath(templates))}{WATCHING}{PRESSED_DIRECTORY}"
+    )
+
+    build = project / "build"
+
+    pressed = {
+        path.relative_to(build): path.read_bytes()
+        for path in build.rglob("*")
+        if path.is_file()
+    }
+
+    assert pressed == expect
+
+
+@mark.parametrize(
+    ("files", "links", "change", "expect"),
+    [
+        (
+            {},
+            {},
+            lambda: edit(
+                Path("README.template"),
+                '# {{ name }}!\n\n{% include "_badge.txt" %}\n',
+            ),
+            b"# platen!\n\nBuild: passing\n",
+        ),
+        (
+            {},
+            {},
+            lambda: edit(Path("_badge.txt"), "Build: {{ status }}!\n"),
+            b"# platen\n\nBuild: passing!\n",
+        ),
+        (
+            {},
+            {},
+            lambda: edit(Path("values.yaml"), "name: other\nstatus: passing\n"),
+            b"# other\n\nBuild: passing\n",
+        ),
+        # The values keep their size, so only their later modification time tells.
+        (
+            {},
+            {},
+            lambda: edit(Path("values.yaml"), "name: platen\nstatus: failing\n"),
+            b"# platen\n\nBuild: failing\n",
+        ),
+        # The values keep their size and times, so only their change time tells.
+        (
+            {},
+            {},
+            lambda: _rewrite_keeping_times(
+                Path("values.yaml"),
+                "name: platen\nstatus: Passing\n",
+            ),
+            b"# platen\n\nBuild: Passing\n",
+        ),
+        # An atomic save, so the values' path names a new file.
+        (
+            {},
+            {},
+            lambda: _replace(Path("values.yaml"), "name: other\nstatus: passing\n"),
+            b"# other\n\nBuild: passing\n",
+        ),
+        # Only the template's permissions change, and the output must follow them.
+        (
+            {},
+            {},
+            lambda: Path("README.template").chmod(0o600),
+            b"# platen\n\nBuild: passing\n",
+        ),
+        # `_badge.txt` is a symlink, replaced by one that leads somewhere else.
+        (
+            {"_failing.txt": "Build: failing\n", "_passing.txt": "Build: passing\n"},
+            {"_badge.new": "_failing.txt", "_badge.txt": "_passing.txt"},
+            lambda: os.replace("_badge.new", "_badge.txt"),
+            b"# platen\n\nBuild: failing\n",
+        ),
+        # The include is missing, so `ignore missing` skips it until it's created.
+        (
+            {
+                "README.template": (
+                    '# {{ name }}\n{% include "_new.txt" ignore missing %}'
+                ),
+            },
+            {},
+            lambda: Path("_new.txt").write_text("New\n", encoding="utf-8"),
+            b"# platen\nNew\n",
+        ),
+        # `_new.txt` is missing, so `_badge.txt` is included instead, until `_new.txt`
+        # is created.
+        (
+            {
+                "README.template": (
+                    '# {{ name }}\n{% include ["_new.txt", "_badge.txt"] %}'
+                ),
+            },
+            {},
+            lambda: Path("_new.txt").write_text("New\n", encoding="utf-8"),
+            b"# platen\nNew\n",
+        ),
+    ],
+)
+def test_watch_presses_again_when_file_changes(
+    files: dict[str, str],
+    links: dict[str, str],
+    change: Callable[[], object],
+    expect: bytes,
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must press a template again when it, the values, or a template
+    that it includes changes, however it changes: in place, even at the same size or
+    with its times put back, by being replaced, in its permissions, which the output
+    follows, or through a symlink retargeted, or when a template that it tried to
+    include is created.
+    """
+    _create(project, files, links)
+    _watching(monkeypatch, change)
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_FILE}{WATCHING}{PRESSED_FILE}"
+
+    output = project / "README.md"
+    result = output.read_bytes()
+
+    assert result == expect
+
+    mode = S_IMODE((project / "README.template").stat().st_mode)
+    result = S_IMODE(output.stat().st_mode)
+
+    assert result == mode
+
+
+@mark.parametrize(
+    ("template", "values", "output", "hide", "restore", "message"),
+    [
+        (
+            "README.template",
+            "values.yaml",
+            "build/README.md",
+            lambda: os.rename("README.template", "README.away"),
+            lambda: os.rename("README.away", "README.template"),
+            "No such file or directory: 'README.template'",
+        ),
+        (
+            "README.template",
+            "values.yaml",
+            "build/README.md",
+            lambda: os.rename("values.yaml", "values.away"),
+            lambda: os.rename("values.away", "values.yaml"),
+            "No such file or directory: 'values.yaml'",
+        ),
+        (
+            "README.template",
+            "conf/values.yaml",
+            "build/README.md",
+            # The values' directory doesn't exist yet, and `os.renames` creates it.
+            lambda: None,
+            lambda: os.renames("values.yaml", "conf/values.yaml"),
+            "No such file or directory: 'conf/values.yaml'",
+        ),
+        (
+            "templates",
+            "values.yaml",
+            "build",
+            lambda: os.rename("templates", "templates.away"),
+            lambda: os.rename("templates.away", "templates"),
+            "No such file or directory: 'templates'",
+        ),
+        # `.platenignore` is a broken symlink until what it leads to is created.
+        (
+            "templates",
+            "values.yaml",
+            "build",
+            lambda: Path("templates/.platenignore").symlink_to("../platenignore"),
+            lambda: Path("platenignore").write_text("_*\n", encoding="utf-8"),
+            "No such file or directory: '{templates}/.platenignore'",
+        ),
+    ],
+)
+def test_watch_presses_again_when_missing_input_returns(
+    template: str,
+    values: str,
+    output: str,
+    hide: Callable[[], object],
+    restore: Callable[[], object],
+    message: str,
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must press again once a template, directory of templates, values
+    file or `.platenignore` file that was missing returns, even into a directory that
+    was missing too.
+    """
+    templates = project / "templates"
+
+    _create(
+        project,
+        {
+            "templates/README.md": '# {{ name }}\n\n{% include "_badge.txt" %}\n',
+            "templates/_badge.txt": "Build: {{ status }}\n",
+        },
+    )
+
+    hide()
+    _watching(monkeypatch, restore)
+
+    exit_code = main(
+        [
+            "--template",
+            template,
+            "--values",
+            values,
+            "--out",
+            output,
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+    assert captured.err == (
+        f"platen: error: {message.format(templates=realpath(templates))}\n"
+        f"{WATCHING}"
+        f"platen: Pressed '{template}' to '{output}'\n"
+    )
+
+    pressed = (project / "build" / "README.md").read_bytes()
+    assert pressed == b"# platen\n\nBuild: passing\n"
+
+
+def test_watch_presses_again_when_template_symlink_is_retargeted_to_hard_link(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must press again when a symlink to the template is retargeted to a
+    hard link to the same file by another name, even though nothing that it reads has
+    changed, because Jinja chooses autoescaping by that name.
+    """
+    _create(
+        project,
+        {
+            "body.txt": "{{ name }}\n",
+            "values.yaml": 'name: "<b>"\n',
+        },
+    )
+
+    link(
+        project / "body.txt",
+        project / "body.html",
+    )
+
+    _create(
+        project,
+        {},
+        {
+            "README.template": "body.txt",
+        },
+    )
+
+    # Retarget the symlink atomically, like `ln -sfn` does.
+    _watching(
+        monkeypatch,
+        lambda: (
+            _create(
+                project,
+                {},
+                {
+                    "README.new": "body.html",
+                },
+            ),
+            os.replace(
+                "README.new",
+                "README.template",
+            ),
+        ),
+    )
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_FILE}{WATCHING}{PRESSED_FILE}"
+
+    result = (project / "README.md").read_bytes()
+    assert result == b"&lt;b&gt;\n"
+
+
+def test_watch_presses_again_when_templates_directory_symlink_is_retargeted(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must press again when a symlink to the template's directory is
+    retargeted to a copy made of hard links, even though nothing that it reads has
+    changed, and then press again when an include in the copy is replaced, because
+    includes are found there.
+    """
+    _create(
+        project,
+        {
+            "a/_footer.md": "Footer\n",
+            "a/page.md": '{% include "_footer.md" %}',
+        },
+        {
+            "site": "a",
+        },
+    )
+
+    # A copy made of hard links, like `cp -al` makes.
+    (project / "b").mkdir()
+
+    for name in ("_footer.md", "page.md"):
+        link(
+            project / "a" / name,
+            project / "b" / name,
+        )
+
+    _watching(
+        monkeypatch,
+        # Retarget the symlink atomically, like `ln -sfn` does.
+        lambda: (
+            _create(project, {}, {"site.new": "b"}),
+            os.replace("site.new", "site"),
+        ),
+        lambda: _replace(project / "b" / "_footer.md", "New footer\n"),
+    )
+
+    exit_code = main(
+        [
+            "--template",
+            "site/page.md",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+    pressed = "platen: Pressed 'site/page.md' to 'README.md'\n"
+    assert captured.err == f"{pressed}{WATCHING}{pressed}{pressed}"
+
+    result = (project / "README.md").read_bytes()
+    assert result == b"New footer\n"
+
+
+def test_watch_presses_again_with_real_watcher(project: Path) -> None:
+    """
+    `platen --watch` must press again as soon as watchfiles sees a change, rather than
+    at its next timeout, and press nothing more until something else changes, then
+    stop quietly with exit code 130 on SIGINT, like from Ctrl+C.
+    """
+    with Popen(
+        [
+            sys.executable,
+            "-c",
+            # A process that's started in the background inherits SIGINT ignored, and
+            # Python then never raises `KeyboardInterrupt`.
+            "import signal, sys; "
+            "signal.signal(signal.SIGINT, signal.default_int_handler); "
+            "from platen.cli import main; "
+            "sys.exit(main())",
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+        cwd=project,
+        # watchfiles' environment variables can change how it watches.
+        env={k: v for k, v in os.environ.items() if not k.startswith("WATCHFILES_")},
+        stderr=PIPE,
+        stdout=PIPE,
+        text=True,
+    ) as process:
+        assert process.stderr is not None
+        assert process.stdout is not None
+
+        stderr = process.stderr
+        lines: Queue[str] = Queue()
+
+        def read() -> None:
+            for line in stderr:
+                lines.put(line)
+
+        reader = Thread(daemon=True, target=read)
+        reader.start()
+
+        try:
+            result = lines.get(timeout=10)
+
+            assert result == PRESSED_FILE
+
+            result = lines.get(timeout=10)
+
+            assert result == WATCHING
+
+            # Give watchfiles time to start, so that it sees the change. It wakes Platen
+            # 5 seconds after it starts without a change, so only seeing the change can
+            # press this soon. The time to start and the time to press must stay within
+            # those 5 seconds, so give more to starting, which a busy machine can slow,
+            # than to pressing, which starts about 50 milliseconds after one change.
+            sleep(2)
+            _replace(project / "values.yaml", "name: first\nstatus: passing\n")
+            result = lines.get(timeout=2)
+
+            assert result == PRESSED_FILE
+
+            # A new watcher starts after every press. Give it time to start too, so
+            # that only it can see the next change, rather than Platen's look before
+            # it starts.
+            sleep(2)
+            _replace(project / "values.yaml", "name: second\nstatus: passing\n")
+            result = lines.get(timeout=2)
+
+            assert result == PRESSED_FILE
+
+            # Nothing else changes, so nothing more is pressed, however Platen wakes.
+            with raises(Empty):
+                lines.get(timeout=1)
+
+            process.send_signal(SIGINT)
+            exit_code = process.wait(timeout=10)
+        finally:
+            process.kill()
+            process.wait()
+            reader.join(timeout=10)
+
+        out = process.stdout.read()
+
+    assert exit_code == 130
+    assert out == ""
+
+    # Nothing more was printed, like a traceback.
+    assert lines.empty()
+
+    pressed = (project / "README.md").read_bytes()
+    assert pressed == b"# second\n\nBuild: passing\n"
+
+
+@mark.parametrize(
+    ("template", "output", "watched"),
+    [
+        ("README.template", "build/README.md", ["."]),
+        ("templates", "build", [".", "templates"]),
+    ],
+)
+def test_watch_presses_once_when_nothing_changes(
+    template: str,
+    output: str,
+    watched: list[str],
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must press once, then watch every directory that holds what the
+    press read, non-recursively, for every event, refusing any directory that it can't
+    watch, waking at timeouts, raising Ctrl+C, and with timings and output that
+    watchfiles' environment variables can't change, and must not press again when it's
+    woken without a change.
+    """
+    _create(
+        project,
+        {
+            "templates/README.md": '# {{ name }}\n\n{% include "_badge.txt" %}\n',
+            "templates/_badge.txt": "Build: {{ status }}\n",
+        },
+    )
+
+    # Woken without a change, like by watchfiles' timeout.
+    started = _watching(monkeypatch, lambda: None)
+
+    exit_code = main(
+        [
+            "--template",
+            template,
+            "--values",
+            "values.yaml",
+            "--out",
+            output,
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"platen: Pressed '{template}' to '{output}'\n{WATCHING}"
+
+    expect = [
+        (
+            tuple(realpath(project / name) for name in watched),
+            {
+                "debounce": 1_600,
+                "debug": False,
+                "ignore_permission_denied": False,
+                "raise_interrupt": True,
+                "recursive": False,
+                "rust_timeout": 5_000,
+                "step": 50,
+                "watch_filter": None,
+                "yield_on_timeout": True,
+            },
+        ),
+    ]
+
+    assert started == expect
+
+    pressed = (project / "build" / "README.md").read_bytes()
+    assert pressed == b"# platen\n\nBuild: passing\n"
+
+
+def test_watch_restarts_after_every_press(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must start watching again after every press, even in the same
+    directories, because the change that caused the press could have replaced a watched
+    directory with another at the same path, which Linux stops watching.
+    """
+    started = _watching(
+        monkeypatch,
+        lambda: edit(project / "values.yaml", "name: plated\nstatus: passing\n"),
+    )
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_FILE}{WATCHING}{PRESSED_FILE}"
+
+    root = realpath(project)
+    result = [paths for paths, _ in started]
+
+    assert result == [
+        (root,),
+        (root,),
+    ]
+
+    result = (project / "README.md").read_bytes()
+
+    assert result == b"# plated\n\nBuild: passing\n"
+
+
+def test_watch_restarts_when_directories_change(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must start watching again, in every directory that holds what the
+    press read, when a press reads from a directory that wasn't watched, like a new
+    include's.
+    """
+
+    def include() -> None:
+        _create(project, {"parts/_part.txt": "Part\n"})
+        edit(
+            project / "README.template",
+            '# {{ name }}\n{% include "parts/_part.txt" %}',
+        )
+
+    started = _watching(monkeypatch, include)
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_FILE}{WATCHING}{PRESSED_FILE}"
+
+    root = realpath(project)
+    result = [paths for paths, _ in started]
+
+    assert result == [
+        (root,),
+        (root, f"{root}/parts"),
+    ]
+
+    result = (project / "README.md").read_bytes()
+
+    assert result == b"# platen\nPart\n"
+
+
+def test_watch_restarts_when_directory_is_created_within_templates_directory(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must start watching a directory that's created within the
+    templates directory, without pressing again, so that a template created in it later
+    is seen at once.
+    """
+    _create(project, {"templates/index.md": "# {{ name }}\n"})
+
+    new = project / "templates" / "new"
+
+    def create() -> set[tuple[Change, str]]:
+        new.mkdir()
+        return {(Change.added, realpath(new))}
+
+    started = _watching(monkeypatch, create)
+
+    exit_code = main(
+        [
+            "--templates",
+            "templates",
+            "--values",
+            "values.yaml",
+            "--out",
+            "build",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_DIRECTORY}{WATCHING}"
+
+    root = realpath(project)
+    result = [paths for paths, _ in started]
+
+    assert result == [
+        (root, f"{root}/templates"),
+        (root, f"{root}/templates", f"{root}/templates/new"),
+    ]
+
+
+@mark.parametrize(
+    "change",
+    [
+        Change.deleted,
+        Change.added,
+    ],
+)
+def test_watch_restarts_when_watched_directory_is_replaced(
+    change: Change,
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must start watching again, without pressing again, when an event
+    says that a watched directory was deleted or added, like when a checkout replaces
+    it with another at the same path, which Linux stops watching, even though nothing
+    that the press read has changed.
+    """
+    _create(
+        project,
+        {
+            "README.template": (
+                '# {{ name }}\n{% include "parts/_part.txt" ignore missing %}'
+            ),
+        },
+    )
+
+    parts = project / "parts"
+    parts.mkdir()
+
+    def replace() -> set[tuple[Change, str]]:
+        parts.rmdir()
+        parts.mkdir()
+        return {(change, realpath(parts))}
+
+    started = _watching(monkeypatch, replace)
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_FILE}{WATCHING}"
+
+    root = realpath(project)
+    result = [paths for paths, _ in started]
+
+    assert result == [
+        (root, f"{root}/parts"),
+        (root, f"{root}/parts"),
+    ]
+
+
+def test_watch_starts_watching_again_after_internal_error(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must start a new watcher when watchfiles raises an internal error,
+    like for an event about a file whose name isn't UTF-8 on Linux, which watchfiles
+    then raises at every wake, and keep watching, even when the new watcher fails too,
+    before it wakes. Then, it must wait 5 seconds before starting another, so that an
+    error that every new watcher raises can't start them as fast as they fail, and warn
+    once that it's looking for changes that often instead, until a watcher wakes.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr("platen.cli.sleep", sleeps.append)
+
+    error = 'Unable to decode path "/docs/caf\\xe9" to string'
+
+    def fail() -> None:
+        raise RuntimeError(error)
+
+    started = _watching(
+        monkeypatch,
+        fail,
+        lambda: None,
+        fail,
+        fail,
+        fail,
+        lambda: None,
+    )
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+    assert captured.err == (
+        f"{PRESSED_FILE}{WATCHING}"
+        "platen: warning: Can't watch for changes, so looking for them every 5 seconds "
+        f"instead: {error}\n"
+    )
+
+    root = realpath(project)
+    result = [paths for paths, _ in started]
+
+    assert result == [
+        (root,),
+        (root,),
+        (root,),
+        (root,),
+        (root,),
+    ]
+
+    # The third and fourth watchers each replaced one that failed, and failed too before
+    # they woke. The first failed before it woke, but replaced none.
+    assert sleeps == [5, 5]
+
+
+def test_watch_starts_watching_again_after_internal_error_without_waiting_after_press(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must not wait before starting a new watcher when one fails before
+    it wakes, if the watcher that it replaced ended for a press rather than failing,
+    even though the one before that failed.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr("platen.cli.sleep", sleeps.append)
+
+    def fail() -> None:
+        raise RuntimeError('Unable to decode path "/docs/caf\\xe9" to string')
+
+    def change_then_fail() -> None:
+        edit(project / "values.yaml", "name: other\nstatus: passing\n")
+        fail()
+
+    started = _watching(
+        monkeypatch,
+        change_then_fail,
+        # The watcher that replaced the failed one presses before it wakes, so this
+        # fails the watcher after that one.
+        fail,
+        lambda: None,
+    )
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_FILE}{WATCHING}{PRESSED_FILE}"
+
+    root = realpath(project)
+    result = [paths for paths, _ in started]
+
+    # The watcher that pressed never woke, so it never started.
+    assert result == [
+        (root,),
+        (root,),
+        (root,),
+    ]
+
+    assert sleeps == []
+
+
+@mark.parametrize(
+    ("interrupted", "changes", "err", "expect"),
+    [
+        # The interrupt comes during the first press, before anything's watched.
+        (1, [], "", None),
+        # Nothing changes, so the interrupt comes while waiting for a change.
+        (2, [], f"{PRESSED_FILE}{WATCHING}", b"# platen\n\nBuild: passing\n"),
+        # The values change, so the interrupt comes during the press that follows.
+        (
+            2,
+            [lambda: edit(Path("values.yaml"), "name: other\nstatus: passing\n")],
+            f"{PRESSED_FILE}{WATCHING}",
+            b"# platen\n\nBuild: passing\n",
+        ),
+    ],
+)
+def test_watch_stops_quietly_when_interrupted(
+    interrupted: int,
+    changes: list[Callable[[], object]],
+    err: str,
+    expect: bytes | None,
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    An interrupt must stop `platen --watch` quietly, with exit code 130, whether it
+    comes during the first press, before anything's watched, while waiting for a
+    change, or during a later press.
+    """
+    press_file = Platen.press_file
+    presses = count(1)
+
+    def press_file_unless_interrupted(
+        self: Platen,
+        template: PathLike[str] | str,
+        destination: PathLike[str] | str,
+    ) -> None:
+        if next(presses) == interrupted:
+            raise KeyboardInterrupt
+
+        press_file(self, template, destination)
+
+    monkeypatch.setattr("platen.cli.Platen.press_file", press_file_unless_interrupted)
+    _watching(monkeypatch, *changes)
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == err
+
+    output = project / "README.md"
+    result = output.read_bytes() if output.exists() else None
+
+    assert result == expect
+
+
+def test_watch_stops_watching_template_that_is_no_longer_included(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must stop watching a template that the last press no longer read,
+    like an include that's been removed.
+    """
+    _watching(
+        monkeypatch,
+        lambda: edit(project / "README.template", "# {{ name }}\n"),
+        lambda: edit(project / "_badge.txt", "Build: {{ status }}!\n"),
+    )
+
+    exit_code = main(
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{PRESSED_FILE}{WATCHING}{PRESSED_FILE}"
+
+    result = (project / "README.md").read_bytes()
+
+    assert result == b"# platen\n"
+
+
+def test_watch_warns_when_directory_has_nothing_to_press(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must warn when a directory has nothing to press, as a press without
+    `--watch` does, and press once a template is created there.
+    """
+    templates = project / "templates"
+    templates.mkdir()
+
+    _watching(
+        monkeypatch,
+        lambda: (templates / "index.md").write_text("# {{ name }}\n", encoding="utf-8"),
+    )
+
+    exit_code = main(
+        [
+            "--templates",
+            "templates",
+            "--values",
+            "values.yaml",
+            "--out",
+            "build",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+    assert captured.err == (
+        "platen: warning: Nothing to press in 'templates': it's empty, or everything "
+        "in it is ignored\n"
+        f"{WATCHING}{PRESSED_DIRECTORY}"
+    )
+
+    result = (project / "build" / "index.md").read_bytes()
+
+    assert result == b"# platen\n"
+
+
+def test_watch_watches_directories_of_everything_read(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    `platen --watch` must watch the real path to each directory that holds something
+    that the press read, and to each directory that a symlink among them leads into,
+    and no other, not even the working directory.
+    """
+    _create(
+        project,
+        {
+            "conf/values.yaml": "name: platen\n",
+            "docs/page.template": (
+                '{% include "parts/_part.txt" %}{% include "_link.txt" %}'
+            ),
+            "docs/parts/_part.txt": "Part\n",
+            "shared/_shared.txt": "Shared\n",
+        },
+        {"docs/_link.txt": "../shared/_shared.txt"},
+    )
+
+    started = _watching(monkeypatch)
+
+    exit_code = main(
+        [
+            "--template",
+            "docs/page.template",
+            "--values",
+            "conf/values.yaml",
+            "--out",
+            "build/page.md",
+            "--watch",
+        ],
+    )
+
+    assert exit_code == 130
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+    assert captured.err == (
+        f"platen: Pressed 'docs/page.template' to 'build/page.md'\n{WATCHING}"
+    )
+
+    root = realpath(project)
+    result = [paths for paths, _ in started]
+
+    assert result == [
+        (
+            f"{root}/conf",
+            f"{root}/docs",
+            f"{root}/docs/parts",
+            f"{root}/shared",
+        ),
+    ]
+
+    result = (project / "build" / "page.md").read_bytes()
+
+    assert result == b"Part\nShared\n"

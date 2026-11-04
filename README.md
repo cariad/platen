@@ -23,11 +23,13 @@ pipx install platen
 ```text
 platen --template FILE \
        --values   FILE \
-       --out      FILE
+       --out      FILE \
+       [--watch]
 
 platen --templates DIRECTORY \
        --values    FILE      \
-       --out       DIRECTORY
+       --out       DIRECTORY \
+       [--watch]
 ```
 
 `--template` and `--templates` are the same option, so either one can name a file or a directory.
@@ -61,6 +63,14 @@ To press every template in a directory, name that directory with `--templates` a
 ```bash
 platen --templates templates --values values.yaml --out build
 ```
+
+To press again whenever the templates or values change, add `--watch`. Platen prints a line for every press, and keeps watching until you press Ctrl+C, even when a press fails:
+
+```bash
+platen --template hello.md --values values.yaml --out build/hello.md --watch
+```
+
+See [Watching for changes](https://cariad.github.io/platen/#watching-for-changes) in the user guide for what's watched, and what isn't.
 
 ## Contributing
 
