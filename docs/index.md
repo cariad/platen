@@ -174,12 +174,12 @@ The command presses a template, or a directory of templates:
 platen --template FILE \
        --values   FILE \
        --out      FILE \
-       [--watch]
+       [--watch] [--serve]
 
 platen --templates DIRECTORY \
        --values    FILE      \
        --out       DIRECTORY \
-       [--watch]
+       [--watch] [--serve]
 ```
 
 `--template` and `--templates` are the same option, so either one can name a file or a directory. The options can come in any order.
@@ -228,6 +228,26 @@ Platen presses again when any of these change:
 - Every template that the last press read, whether it was pressed or included, extended or imported, even when the press failed. That includes the names that the press looked for but couldn't find, like one that `ignore missing` skipped, so creating one presses again.
 - When you press a directory, which templates a walk of it finds, and each of those templates. So adding, deleting, renaming or newly ignoring a template presses again.
 - When a walk fails, the file or directory that it failed on, so that fixing it presses again.
+
+### Serving with live reload
+
+With `--serve`, Platen serves the output at `http://localhost:1440/`, and presses again whenever the templates or values change. After every press, every open HTML page reloads.
+
+For example, to work on a site in `templates` that's pressed into `build`:
+
+```shell
+platen --templates templates --values values.yaml --out build --serve
+```
+
+```text
+platen: Pressed 'templates' to 'build'
+platen: Serving 'build' at http://localhost:1440/
+platen: Watching for changes. Press Ctrl+C to stop.
+```
+
+When you press a single template to a file, Platen serves the whole directory that the file is in, so that links to the files beside it work. For example, `--out README.md` serves the working directory, including your values file and anything else in it. Press into a directory that holds nothing you wouldn't want served.
+
+Platen serves with [crumpet](https://cariad.github.io/crumpet/), which explains exactly what's served.
 
 ## Choosing what to press, and where
 

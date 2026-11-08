@@ -1,11 +1,11 @@
 from pathlib import Path
 
 from pytest import raises
+from rootle.testing import snapshot
 
 from platen import (
     Platen,
 )
-from tests.snapshots import snapshot
 
 
 def test_templates_dir_is_path(

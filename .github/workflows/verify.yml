@@ -18,15 +18,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-      - run: uv sync --locked
-
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
         with:
           just-version: 1.58.0
 
-      - run: just lint
-      - run: just markdown
-      - run: just typing
+      # Each tool runs with only its own dependency group installed. `uv run
+      # --locked` syncs, so `uv sync` isn't needed. Type-checking needs the project
+      # and its dependencies too, so it can't use `--only-group`.
+      - run: just run="uv run --locked --only-group lint" lint
+      - run: just run="uv run --locked --only-group lint" markdown
+      - run: just run="uv run --locked --no-default-groups --group typing" typing
+      - run: just run="uv run --locked --only-group docs" docs
 
   test:
     runs-on: ubuntu-latest
@@ -43,10 +45,10 @@ jobs:
         with:
           python-version: "${{ matrix.python-version }}"
 
-      - run: uv sync --locked
-
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
         with:
           just-version: 1.58.0
 
-      - run: just test
+      # The tests need the project and its dependencies too, so they can't use
+      # `--only-group`.
+      - run: just run="uv run --locked --no-default-groups --group test" test

@@ -5,17 +5,35 @@ requires = [
   "hatchling",
 ]
 
+# Each group holds what one job needs, so that CI installs only that. A plain
+# `uv sync` installs `dev`, which includes them all.
 [dependency-groups]
 dev = [
-  "pyright>=1.1.414",
-  "pytest>=9.1.1",
-  "pytest-cov>=7.1.0",
-  "ruff>=0.16.7",
-  "rumdl>=0.2.73",
   { include-group = "docs" },
+  { include-group = "lint" },
+  { include-group = "test" },
+  { include-group = "typing" },
 ]
+# Builds the documentation site.
 docs = [
   "zensical>=0.0.61",
+]
+# Checks code style and Markdown.
+lint = [
+  "ruff>=0.16.7",
+  "rumdl>=0.2.73",
+]
+# Runs the tests, with coverage. The tests find a free port with notwork.
+test = [
+  "notwork>=1.2.0",
+  "pytest>=9.1.1",
+  "pytest-cov>=7.1.0",
+]
+# Type-checks the source and the tests, which import notwork and pytest.
+typing = [
+  "notwork>=1.2.0",
+  "pyright>=1.1.414",
+  "pytest>=9.1.1",
 ]
 
 [project]
@@ -32,9 +50,10 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
+  "crumpet>=0.3.0,<0.4",
   "jinja2>=3.1.6,<4",
   "mosey>=0.8.0,<0.9",
-  "rootle>=1.2.0,<2",
+  "rootle>=1.3.0,<2",
   "ruamel-yaml>=0.19.1,<0.20",
   "watchfiles>=1.3.0,<2",
 ]
@@ -93,6 +112,7 @@ testpaths = [
 extend-ignore = [
   "D100", # Docstrings in public modules
   "D104", # Docstrings in public packages
+  "D105", # Docstrings on magic methods, like `__str__`
   "D107", # Docstrings on __init__ functions
   "D205", # One-line docstring summary followed by detail
   "D212", # Summary on the first line (we use D213 instead)

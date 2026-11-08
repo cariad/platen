@@ -5,36 +5,23 @@ from os.path import join, realpath
 from pathlib import Path
 
 from pytest import MonkeyPatch, fixture, mark
+from rootle import fingerprint
+from rootle.testing import edit
 
-from platen import Platen
-from platen.watch import Look, look, status
-from tests.edits import edit
+from platen.watch import Look, look
 
 
 @fixture
-def project(monkeypatch: MonkeyPatch, tmp_path: Path) -> Path:
+def project(project: Path) -> Path:
     """
-    Create a working directory that holds `README.template`, which includes
-    `_badge.txt`, `values.yaml` and `templates`, a directory of templates, and return
-    its path.
+    Add `templates`, a directory of templates, to the shared project, which holds
+    `README.template`, `_badge.txt` and `values.yaml`, and return the project's path.
 
     `templates` holds `doc.md`, which includes `_footer.md`, and `sub/doc.md`. A walk
     finds neither `_footer.md`, which `.platenignore` ignores, nor `logo.png`, which has
     a binary file's name. `linked` is a symlink to `templates`.
     """
-    (tmp_path / "README.template").write_text(
-        '# {{ name }}\n\n{% include "_badge.txt" %}\n',
-        encoding="utf-8",
-    )
-
-    (tmp_path / "_badge.txt").write_text("Build: {{ status }}\n", encoding="utf-8")
-
-    (tmp_path / "values.yaml").write_text(
-        "name: platen\nstatus: passing\n",
-        encoding="utf-8",
-    )
-
-    templates_dir = tmp_path / "templates"
+    templates_dir = project / "templates"
     (templates_dir / "sub").mkdir(parents=True)
     (templates_dir / ".platenignore").write_text("_*\n", encoding="utf-8")
     (templates_dir / "_footer.md").write_text("Footer\n", encoding="utf-8")
@@ -46,10 +33,9 @@ def project(monkeypatch: MonkeyPatch, tmp_path: Path) -> Path:
 
     (templates_dir / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     (templates_dir / "sub" / "doc.md").write_text("Hello\n", encoding="utf-8")
-    (tmp_path / "linked").symlink_to("templates", target_is_directory=True)
+    (project / "linked").symlink_to("templates", target_is_directory=True)
 
-    monkeypatch.chdir(tmp_path)
-    return tmp_path
+    return project
 
 
 @mark.parametrize(
@@ -111,7 +97,7 @@ def test_look_changes_when_template_symlink_is_retargeted_to_hard_link(
 
     assert before.names == ("body.txt",)
     assert after.names == ("body.html",)
-    assert after.statuses == before.statuses
+    assert after.fingerprints == before.fingerprints
 
 
 def test_look_changes_when_template_that_was_read_is_ignored(project: Path) -> None:
@@ -134,7 +120,7 @@ def test_look_changes_when_template_that_was_read_is_ignored(project: Path) -> N
 
     assert before.names == ("doc.md", "sub/doc.md")
     assert after.names == ("sub/doc.md",)
-    assert after.statuses == before.statuses
+    assert after.fingerprints == before.fingerprints
 
 
 def test_look_changes_when_templates_directory_symlink_is_retargeted_to_hard_links(
@@ -173,7 +159,7 @@ def test_look_changes_when_templates_directory_symlink_is_retargeted_to_hard_lin
     assert before.templates_dir == realpath(project / "a")
     assert after.templates_dir == realpath(project / "b")
     assert after.names == before.names
-    assert after.statuses == before.statuses
+    assert after.fingerprints == before.fingerprints
 
 
 def test_look_does_not_change_when_ignore_file_gains_comment(project: Path) -> None:
@@ -219,8 +205,8 @@ def test_look_finds_no_name_when_template_cannot_be_named(
         None,
         None,
         {
-            "README.template": status("README.template"),
-            "values.yaml": status("values.yaml"),
+            "README.template": fingerprint("README.template"),
+            "values.yaml": fingerprint("values.yaml"),
         },
     )
 
@@ -242,8 +228,8 @@ def test_look_finds_no_name_when_template_leads_outside_its_directory(
         realpath(project / "sub"),
         None,
         {
-            "sub/page.template": status("sub/page.template"),
-            "values.yaml": status("values.yaml"),
+            "sub/page.template": fingerprint("sub/page.template"),
+            "values.yaml": fingerprint("values.yaml"),
         },
     )
 
@@ -264,9 +250,9 @@ def test_look_finds_template_values_and_templates_read(project: Path) -> None:
         realpath(project),
         ("README.template",),
         {
-            "README.template": status("README.template"),
-            "values.yaml": status("values.yaml"),
-            badge: status(badge),
+            "README.template": fingerprint("README.template"),
+            "values.yaml": fingerprint("values.yaml"),
+            badge: fingerprint(badge),
         },
     )
 
@@ -310,7 +296,7 @@ def test_look_finds_walked_templates_in_directory(
     expect = Look(
         templates_dir,
         ("doc.md", "sub/doc.md"),
-        {p: status(p) for p in paths},
+        {p: fingerprint(p) for p in paths},
     )
 
     assert found == expect
@@ -331,8 +317,8 @@ def test_look_watches_file_that_stops_walk(project: Path) -> None:
         realpath(project / "templates"),
         None,
         {
-            "templates": status("templates"),
-            "values.yaml": status("values.yaml"),
+            "templates": fingerprint("templates"),
+            "values.yaml": fingerprint("values.yaml"),
             join(realpath(project / "templates"), ".platenignore"): None,
         },
     )
@@ -351,7 +337,7 @@ def test_look_watches_missing_template(project: Path) -> None:
         None,
         {
             "missing.md": None,
-            "values.yaml": status("values.yaml"),
+            "values.yaml": fingerprint("values.yaml"),
         },
     )
 
@@ -367,20 +353,20 @@ def test_look_watches_templates_directory_when_walk_error_names_no_file(
     that names no file, rather than at a path named "None".
     """
 
-    def templates(*_: object) -> list[str]:
-        raise OSError(EIO, strerror(EIO))
+    class Walker:
+        def walk(self, *_: object) -> list[object]:
+            raise OSError(EIO, strerror(EIO))
 
-    # Patch the class, because `platen.watch.look` names the function, which shadows
-    # its module.
-    monkeypatch.setattr(Platen, "templates", templates)
+    # `platen.watch.look` names the function, which shadows its module.
+    monkeypatch.setattr(import_module("platen.watch.look"), "walker", Walker)
 
     found = look("templates", "values.yaml", [])
     expect = Look(
         realpath(project / "templates"),
         None,
         {
-            "templates": status("templates"),
-            "values.yaml": status("values.yaml"),
+            "templates": fingerprint("templates"),
+            "values.yaml": fingerprint("values.yaml"),
         },
     )
 

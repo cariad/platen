@@ -22,7 +22,6 @@ class DestinationWithinDirectoryError(PlatenError, ValueError):
         self.directory = directory
 
     def __str__(self) -> str:
-        """Return a string representation of the exception."""
         return (
             f"Destination '{self.destination_path}' is within "
             f"'{self.directory}', the directory being pressed"

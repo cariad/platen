@@ -6,6 +6,7 @@ from re import escape
 from pytest import MonkeyPatch, mark, raises, skip
 from rootle.testing import (
     can_chmod_deny_writing,
+    snapshot,
 )
 
 from platen import (
@@ -14,7 +15,6 @@ from platen import (
     DestinationWithinDirectoryError,
     Platen,
 )
-from tests.snapshots import snapshot
 
 
 def test_press_ignores_protected_file_that_does_not_exist(tmp_path: Path) -> None:

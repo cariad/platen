@@ -22,7 +22,6 @@ class TemplateNotInDirectoryError(PlatenError, ValueError):
         self.templates_dir = templates_dir
 
     def __str__(self) -> str:
-        """Return a string representation of the exception."""
         return (
             f"Template '{self.template_path}' is not within the "
             f"templates directory '{self.templates_dir}'"

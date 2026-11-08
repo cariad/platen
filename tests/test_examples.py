@@ -1,11 +1,9 @@
-from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, cast
 
-from ruamel.yaml import YAML
+from rootle.testing import snapshot
 
 from platen import Platen
-from tests.snapshots import snapshot
+from platen.cli.values import load_values
 
 _examples_dir = Path(__file__).parent.parent / "examples"
 
@@ -16,10 +14,9 @@ def test_task_list(tmp_path: Path) -> None:
     a change to pressing can't leave the example out of date.
     """
     example = _examples_dir / "task_list"
-    values = YAML(typ="safe").load(example / "tasks.yaml")  # pyright: ignore[reportUnknownMemberType]
-    assert isinstance(values, Mapping)
+    values = load_values(example / "tasks.yaml")
 
-    Platen(example / "templates", cast(Mapping[str, Any], values)).press(tmp_path)
+    Platen(example / "templates", values).press(tmp_path)
 
     result = snapshot(tmp_path)
     expect = snapshot(example / "build")
