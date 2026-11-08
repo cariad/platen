@@ -104,16 +104,16 @@ wheels = [
 
 [[package]]
 name = "crumpet"
-version = "0.3.0"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "notwork" },
     { name = "rootle" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f1/1c/51681299055327192603b04fb0c0ce79d4e1d56fed5a2f1ea734a57cdb34/crumpet-0.3.0.tar.gz", hash = "sha256:1930ac41c43b72b84e3bc847003748f8e05db2502aa5e65708768fdac2f4116f", size = 71203, upload-time = "2026-11-08T11:34:23.49Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d4/cf/ca5047d3c94d1efd77b241a653fd5009a2ef267616e679f84a34b3ca4680/crumpet-0.4.0.tar.gz", hash = "sha256:bdfc5139e177c4f2941795f7d8fa573e7e716c463ecff5cfaad8fd3fa9108790", size = 71985, upload-time = "2026-11-08T15:33:38.43Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bb/ca/40424762ca024025f4022d718e8d3cc2b3ee8a0bcd0b39900edcd38fb739/crumpet-0.3.0-py3-none-any.whl", hash = "sha256:851cf3eb6f444f9d251bd8d764d14fb06ec3505c577acd09615c25046184056c", size = 13481, upload-time = "2026-11-08T11:34:22.126Z" },
+    { url = "https://files.pythonhosted.org/packages/b6/fe/9dd079b2a9e779f80ef08225028ca940eea59c9e0120efcecdfc080ffb65/crumpet-0.4.0-py3-none-any.whl", hash = "sha256:243db422d74ebb8cfd5a869f8fe2723d28e4eac2f28fa60c6c2ee08731131d51", size = 13739, upload-time = "2026-11-08T15:33:37.068Z" },
 ]
 
 [[package]]
@@ -272,7 +272,7 @@ typing = [
 
 [package.metadata]
 requires-dist = [
-    { name = "crumpet", specifier = ">=0.3.0,<0.4" },
+    { name = "crumpet", specifier = ">=0.4.0,<0.5" },
     { name = "jinja2", specifier = ">=3.1.6,<4" },
     { name = "mosey", specifier = ">=0.8.0,<0.9" },
     { name = "rootle", specifier = ">=1.3.0,<2" },

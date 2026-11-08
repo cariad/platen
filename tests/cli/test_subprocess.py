@@ -19,6 +19,14 @@ from tests.cli.lines import (
 )
 
 
+def _page(url: str) -> str:
+    """Get a page as it was pressed, without crumpet's script to reload it."""
+    with http_get(url) as response:
+        page = response.read().decode()
+
+    return page.partition("<script")[0]
+
+
 def test_presses_without_importing_watchfiles_or_crumpet(project: Path) -> None:
     """
     A press without `--watch` or `--serve` must never import watchfiles, or the anyio
@@ -75,13 +83,6 @@ def test_serve_serves_pages_with_real_server(project: Path) -> None:
 
     port = free_port()
     pressed = "platen: Pressed 'page.template' to 'page.html'\n"
-
-    def fetch(url: str) -> str:
-        # The page as it was pressed, without the script that crumpet adds to reload it.
-        with http_get(url) as response:
-            page = response.read().decode()
-
-        return page.partition("<script")[0]
 
     with Popen(
         [
@@ -141,7 +142,7 @@ def test_serve_serves_pages_with_real_server(project: Path) -> None:
             assert result == WATCHING
 
             url = f"http://localhost:{port}/page.html"
-            result = fetch(url)
+            result = _page(url)
 
             assert result == "<body>platen</body>\n"
 
@@ -152,7 +153,7 @@ def test_serve_serves_pages_with_real_server(project: Path) -> None:
 
             assert result == pressed
 
-            result = fetch(url)
+            result = _page(url)
 
             assert result == "<body>second</body>\n"
 
@@ -170,6 +171,122 @@ def test_serve_serves_pages_with_real_server(project: Path) -> None:
 
     # Nothing more was printed, like a traceback.
     assert lines.empty()
+
+
+def test_serve_serves_where_output_symlink_leads_now(project: Path) -> None:
+    """
+    `platen --serve` must serve the directory that a symlink on the output's path leads
+    to now, once it's changed to lead elsewhere, rather than where it led when serving
+    started, since that's where the next press writes.
+    """
+    (project / "page.template").write_text(
+        "<body>{{ name }}</body>\n",
+        encoding="utf-8",
+    )
+
+    (project / "before").mkdir()
+    (project / "after").mkdir()
+    site = project / "site"
+    site.symlink_to("before")
+
+    port = free_port()
+    pressed = "platen: Pressed 'page.template' to 'site/page.html'\n"
+
+    with Popen(
+        [
+            sys.executable,
+            "-c",
+            # A process that's started in the background inherits SIGINT ignored, and
+            # Python then never raises `KeyboardInterrupt`. A free port, rather than
+            # the one that Platen might be serving on for real.
+            "import signal, sys; "
+            "signal.signal(signal.SIGINT, signal.default_int_handler); "
+            "import platen.cli; "
+            f"platen.cli.serve.PORT = {port}; "
+            "sys.exit(platen.cli.main())",
+            "--template",
+            "page.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "site/page.html",
+            "--serve",
+        ],
+        cwd=project,
+        # watchfiles' environment variables can change how it watches.
+        env={k: v for k, v in os.environ.items() if not k.startswith("WATCHFILES_")},
+        stderr=PIPE,
+        stdout=PIPE,
+        text=True,
+    ) as process:
+        assert process.stderr is not None
+        assert process.stdout is not None
+
+        stderr = process.stderr
+        lines: Queue[str] = Queue()
+
+        def read() -> None:
+            for line in stderr:
+                # Python's own server prints a line for every request, among Platen's.
+                if not fullmatch(r"\S+ - - \[[^\]]*\] .*\n", line):
+                    lines.put(line)
+
+        reader = Thread(daemon=True, target=read)
+        reader.start()
+
+        try:
+            result = lines.get(timeout=10)
+
+            assert result == pressed
+
+            result = lines.get(timeout=10)
+
+            assert result == (
+                f"platen: Serving 'site/page.html' at http://localhost:{port}/page.html\n"
+            )
+
+            result = lines.get(timeout=10)
+
+            assert result == WATCHING
+
+            url = f"http://localhost:{port}/page.html"
+            result = _page(url)
+
+            assert result == "<body>platen</body>\n"
+
+            # The symlink isn't among what the press read, so changing it presses
+            # nothing. The change to the values does, through the symlink, to where it
+            # leads now. watchfiles wakes Platen 5 seconds after it starts without a
+            # change, so the change is pressed by then, even if watchfiles misses it.
+            site.unlink()
+            site.symlink_to("after")
+            save_atomically(project / "values.yaml", "name: second\nstatus: passing\n")
+            result = lines.get(timeout=10)
+
+            assert result == pressed
+
+            result = _page(url)
+
+            assert result == "<body>second</body>\n"
+
+            process.send_signal(SIGINT)
+            exit_code = process.wait(timeout=10)
+        finally:
+            process.kill()
+            process.wait()
+            reader.join(timeout=10)
+
+        out = process.stdout.read()
+
+    assert exit_code == 130
+    assert out == ""
+
+    # Nothing more was printed, like a traceback.
+    assert lines.empty()
+
+    result = (project / "after" / "page.html").read_bytes()
+
+    assert result == b"<body>second</body>\n"
 
 
 def test_watch_presses_again_with_real_watcher(project: Path) -> None:
