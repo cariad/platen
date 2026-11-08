@@ -5,12 +5,12 @@ from pathlib import Path
 
 from jinja2 import TemplateNotFound
 from pytest import mark, raises, skip
+from rootle.testing import snapshot
 
 from platen import (
     Platen,
     TemplateNotPressableError,
 )
-from tests.snapshots import snapshot
 
 
 @mark.parametrize(

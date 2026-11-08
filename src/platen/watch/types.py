@@ -1,6 +1,6 @@
 from typing import NamedTuple
 
-from .status import Status
+from rootle.types import Fingerprint
 
 
 class Look(NamedTuple):
@@ -16,7 +16,8 @@ class Look(NamedTuple):
     Real path to the source templates directory that a press would load templates from,
     or `None` when the template can't be found, or can't be resolved.
 
-    It's kept apart from `statuses`, because it can change when the statuses don't:
+    It's kept apart from `fingerprints`, because it can change when the fingerprints
+    don't:
     retargeting a symlink to the template's directory, so that it leads to a copy of
     hard links, changes where includes are found.
     """
@@ -31,14 +32,14 @@ class Look(NamedTuple):
     name is the file that it leads to, through any symlinks, because Jinja chooses
     autoescaping by that name.
 
-    The names are kept apart from `statuses`, because they can change when the statuses
-    don't: newly ignoring a template that the last press read keeps its path watched,
-    and retargeting a symlink to the template, so that it leads to a hard link to the
-    same file by another name, keeps every status the same.
+    The names are kept apart from `fingerprints`, because they can change when the
+    fingerprints don't: newly ignoring a template that the last press read keeps its
+    path watched, and retargeting a symlink to the template, so that it leads to a hard
+    link to the same file by another name, keeps every fingerprint the same.
     """
 
-    statuses: dict[str, Status | None]
+    fingerprints: dict[str, Fingerprint | None]
     """
-    The status of each watched path, keyed by the path as it's watched, or `None` when
-    nothing can be found there.
+    The fingerprint of each watched path, keyed by the path as it's watched, or `None`
+    when nothing can be found there.
     """

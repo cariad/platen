@@ -1,22 +1,18 @@
 from collections.abc import Callable, Iterable, Mapping
 from logging import getLogger
-from os import PathLike, scandir, stat
-from os.path import samestat
+from os import PathLike
 from pathlib import Path, PurePosixPath
 from shutil import copymode
 from typing import Any
 
 from jinja2 import (
     Environment,
-    FileSystemLoader,
     StrictUndefined,
     Template,
     TemplateNotFound,
     select_autoescape,
 )
-from jinja2.loaders import split_template_path
-from mosey import Mosey
-from rootle import identity, relative_within, resolve
+from rootle import as_spelled, identity, relative_within, resolve
 from rootle.types import Identity
 
 from .exceptions import (
@@ -26,85 +22,10 @@ from .exceptions import (
     TemplateNotInDirectoryError,
     TemplateNotPressableError,
 )
-
-IGNORE_FILENAME = ".platenignore"
-"""
-Name of the files that list patterns of paths to ignore.
-
-See https://cariad.github.io/mosey/ignore-files/ for the rules.
-"""
+from .loader import Loader
+from .walker import walker
 
 log = getLogger(__name__)
-
-
-class _Loader(FileSystemLoader):
-    """
-    Loads templates like `FileSystemLoader`, but names a template that isn't UTF-8, and
-    records the path to every template that it's asked for.
-
-    Every template is loaded through here, whether it's pressed or referenced (by
-    `extends`, `include`, `import`, etc) while another is rendered.
-    """
-
-    def __init__(
-        self,
-        searchpath: Path,
-        on_load: Callable[[Path], object] | None,
-    ) -> None:
-        super().__init__(searchpath)
-
-        self.loaded: set[Path] = set()
-        """
-        Path to every template file that the loader has loaded or tried to load, whether
-        or not it was found, was a regular file, or was UTF-8.
-        """
-
-        self._on_load = on_load
-
-    def get_source(
-        self,
-        environment: Environment,
-        template: str,
-    ) -> tuple[str, str, Callable[[], bool]]:
-        """
-        Load a template's source, record its path in `loaded`, and pass its path to
-        `on_load`.
-
-        Args:
-            environment: The environment that's loading the template.
-            template: Name of the template, relative to the source templates directory.
-
-        Returns:
-            The template's source, its file name, and a function that says whether the
-            file is unchanged.
-
-        Raises:
-            TemplateNotPressableError: When the template isn't UTF-8.
-        """
-        # This is the file that Jinja reads, from the only directory that it searches.
-        # `split_template_path` raises the same `TemplateNotFound` for a name like
-        # "../doc.md" as Jinja would.
-        path = Path(
-            self.searchpath[0],
-            *split_template_path(template),
-        )
-
-        # Record the path before reading it, so that a template that's missing, isn't a
-        # regular file, or isn't UTF-8 is recorded too. Watching for changes needs that,
-        # because creating or fixing that template is the change to watch for. It needs
-        # to look at the template before it's read too, so that a change made after it
-        # was read is seen.
-        self.loaded.add(path)
-
-        if self._on_load is not None:
-            self._on_load(path)
-
-        try:
-            return super().get_source(environment, template)
-        except UnicodeDecodeError as error:
-            # Jinja reads templates as UTF-8, and its error doesn't name the file.
-            reason = f"it isn't valid UTF-8 ({error.reason} at byte {error.start})"
-            raise TemplateNotPressableError(path, reason) from error
 
 
 def _identities(paths: Iterable[Path]) -> dict[Identity, Path]:
@@ -201,7 +122,7 @@ class Platen:
         # aren't resolved until each press, so that they're checked where they lead.
         self._protect = tuple(Path(p).absolute() for p in protect)
 
-        self._loader = _Loader(
+        self._loader = Loader(
             self._templates_dir,
             on_load,
         )
@@ -216,14 +137,6 @@ class Platen:
             trim_blocks=True,
             undefined=StrictUndefined,
         )
-
-        # Walks leave out the `.platenignore` files themselves, and common binary files
-        # by their names, unless a `.platenignore` file re-includes them. A walker never
-        # changes, so build it once.
-        builder = Mosey()
-        builder.set_ignore_filename(IGNORE_FILENAME)
-        builder.ignore_binary_files()
-        self._walker = builder.build()
 
     def _name(self, named: PathLike[str] | str) -> str:
         """
@@ -311,47 +224,6 @@ class Platen:
                 copymode(self._templates_dir / name, destination)
 
             log.info("Pressed %s to %s", name, destination)
-
-    def _spelled(self, name: str) -> str:
-        """
-        Spell a directory's name the way the file system lists it.
-
-        `_name` keeps the caller's spelling, or a symlink's, which a case- or
-        normalisation-insensitive file system can store differently, but walks only
-        start in a directory that's spelled exactly. So each name is found in its
-        directory's listing by identity rather than by name.
-
-        Args:
-            name: POSIX-style path to the directory, relative to the source templates
-                directory, as `_name` names it.
-
-        Returns:
-            The path, with each name spelled as the file system lists it. A name that
-            can't be found is kept as it was given, so that the walk names it in its
-            error.
-        """
-        parts = PurePosixPath(name).parts
-        parent = self._templates_dir
-
-        for index, part in enumerate(parts):
-            try:
-                wanted = stat(parent / part)
-
-                with scandir(parent) as entries:
-                    listed = next(
-                        entry.name
-                        for entry in entries
-                        if not entry.is_symlink() and samestat(entry.stat(), wanted)
-                    )
-
-            except OSError, StopIteration:
-                # Leave the rest to the walk, which raises its own errors.
-                break
-
-            parts = (*parts[:index], listed, *parts[index + 1 :])
-            parent = parent / listed
-
-        return PurePosixPath(*parts).as_posix() if parts else "."
 
     def _template(self, name: str) -> Template:
         """
@@ -483,10 +355,13 @@ class Platen:
             jinja2.TemplateError: When a template can't be found or rendered, including
                 when a template that it references isn't a regular file.
         """
-        name = self._spelled(self._name(directory))
+        # `_name` keeps the caller's spelling, or a symlink's, which a case- or
+        # normalisation-insensitive file system can store differently, but walks only
+        # start in a directory that's spelled exactly.
+        name = as_spelled(self._name(directory), self._templates_dir).as_posix()
         path = self._templates_dir / name
 
-        self._walker.check_walk_can_start(
+        walker().check_walk_can_start(
             self._templates_dir,
             start=name,
         )
@@ -508,7 +383,7 @@ class Platen:
         # press from the same walk, rather than walking the requested directory again. A
         # walk yields exactly what a walk that starts in the requested directory would
         # within it, so long as the directory is spelled exactly as the walk lists it,
-        # which `_spelled` sees to: https://cariad.github.io/mosey/starting-directories/
+        # which `as_spelled` sees to: https://cariad.github.io/mosey/starting-directories/
         #
         # Finish the walk before pressing anything. Mosey lists each directory as it
         # reaches it, so a result written into the templates directory, like through a
@@ -619,9 +494,7 @@ class Platen:
             OSError: When the directory can't be walked, or when a `.platenignore` file
                 can't be read.
         """
-        return [
-            step.relative_as_posix for step in self._walker.walk(self._templates_dir)
-        ]
+        return [step.relative_as_posix for step in walker().walk(self._templates_dir)]
 
     @property
     def templates_dir(self) -> Path:

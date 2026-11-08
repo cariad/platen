@@ -1,24 +1,31 @@
 default: local
 
+# How to run a tool. CI overrides this to install only the tool's own dependency
+# group, like `just run="uv run --locked --only-group lint" lint`.
+run := "uv run"
+
+docs:
+    {{run}} zensical build
+
 fix:
-    uv run ruff check --fix .
-    uv run ruff format .
-    uv run rumdl check --fix .
+    {{run}} ruff check --fix .
+    {{run}} ruff format .
+    {{run}} rumdl check --fix .
 
 lint:
-    uv run ruff check .
-    uv run ruff format --check .
+    {{run}} ruff check .
+    {{run}} ruff format --check .
 
 markdown:
-    uv run rumdl check .
+    {{run}} rumdl check .
 
 start-docs:
-  uv run zensical serve
+    {{run}} zensical serve
 
 typing:
-    uv run pyright
+    {{run}} pyright
 
 test:
-    uv run pytest
+    {{run}} pytest
 
 local: markdown lint typing test

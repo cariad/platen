@@ -24,12 +24,12 @@ pipx install platen
 platen --template FILE \
        --values   FILE \
        --out      FILE \
-       [--watch]
+       [--watch] [--serve]
 
 platen --templates DIRECTORY \
        --values    FILE      \
        --out       DIRECTORY \
-       [--watch]
+       [--watch] [--serve]
 ```
 
 `--template` and `--templates` are the same option, so either one can name a file or a directory.
@@ -71,6 +71,14 @@ platen --template hello.md --values values.yaml --out build/hello.md --watch
 ```
 
 See [Watching for changes](https://cariad.github.io/platen/#watching-for-changes) in the user guide for what's watched, and what isn't.
+
+To see your pages in a browser while you work, add `--serve` instead. Platen serves at `http://localhost:1440/`, re-presses when the templates or values change, and reloads open HTML pages automatically:
+
+```bash
+platen --templates templates --values values.yaml --out build --serve
+```
+
+See [Serving with live reload](https://cariad.github.io/platen/#serving-with-live-reload) in the user guide for what's served, and how.
 
 ## Contributing
 

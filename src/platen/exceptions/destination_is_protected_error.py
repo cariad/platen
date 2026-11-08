@@ -24,7 +24,6 @@ class DestinationIsProtectedError(PlatenError, ValueError):
         self.protected_path = protected_path
 
     def __str__(self) -> str:
-        """Return a string representation of the exception."""
         return (
             f"Destination '{self.destination_path}' is the same file as "
             f"protected file '{self.protected_path}'"

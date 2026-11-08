@@ -6,6 +6,7 @@ from pathlib import Path
 from pytest import LogCaptureFixture, MonkeyPatch, mark, raises, skip
 from rootle.testing import (
     is_treated_as_same_name,
+    snapshot,
 )
 
 from platen import (
@@ -13,7 +14,6 @@ from platen import (
     Platen,
 )
 from tests.platen.symlinks import symlinked_directories
-from tests.snapshots import snapshot
 
 
 def test_press_directory_checks_directory_before_working_directory(

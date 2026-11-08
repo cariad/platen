@@ -29,7 +29,6 @@ class DestinationIsTemplateError(PlatenError, ValueError):
         self.template_path = template_path
 
     def __str__(self) -> str:
-        """Return a string representation of the exception."""
         return (
             f"Destination '{self.destination_path}' is the same file as "
             f"template '{self.template_path}'"

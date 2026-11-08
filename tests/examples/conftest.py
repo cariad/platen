@@ -1,15 +1,13 @@
 from collections.abc import Mapping
 from pathlib import Path
 from stat import S_IMODE
-from typing import Any, cast
+from typing import Any
 
 from pytest import FixtureRequest, fixture
-from ruamel.yaml import YAML
 
-from platen.platen import Platen
+from platen import Platen
+from platen.cli.values import load_values
 from tests.types import AssertFileWasPressed, AssertOutputMatchesExpect
-
-_yaml = YAML(typ="safe")
 
 
 def _relative_files(directory: Path) -> set[Path]:
@@ -95,7 +93,4 @@ def platen(
 @fixture
 def values(request: FixtureRequest) -> Mapping[str, Any]:
     """This test's values to be pressed."""
-    path = request.path.parent / "values.yaml"
-    data = _yaml.load(path)  # pyright: ignore[reportUnknownMemberType]
-    assert isinstance(data, Mapping), f"'{path}' must be a mapping"
-    return cast(Mapping[str, Any], data)
+    return load_values(request.path.parent / "values.yaml")

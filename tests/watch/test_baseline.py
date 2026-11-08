@@ -1,11 +1,12 @@
 from pytest import mark
+from rootle.types import Fingerprint
 
-from platen.watch import Look, Status, baseline
+from platen.watch import Look, baseline
 
 
-def _status(inode: int) -> Status:
+def _status(inode: int) -> Fingerprint:
     """Make the status of a regular file, told apart from others by its inode."""
-    return Status(
+    return Fingerprint(
         changed=1,
         device=1,
         inode=inode,
@@ -103,8 +104,8 @@ def test_baseline_gives_status_from_after_to_path_not_looked_at_before() -> None
     ],
 )
 def test_baseline_gives_status_from_before_to_path_known_before(
-    before: Status | None,
-    after: Status | None,
+    before: Fingerprint | None,
+    after: Fingerprint | None,
 ) -> None:
     """
     `baseline` must give a path that was looked at before the press its status from
@@ -155,8 +156,8 @@ def test_baseline_gives_status_from_before_to_path_known_before(
     ],
 )
 def test_baseline_gives_status_from_read_to_path_that_press_read(
-    before: dict[str, Status | None],
-    read: Status | None,
+    before: dict[str, Fingerprint | None],
+    read: Fingerprint | None,
 ) -> None:
     """
     `baseline` must give a template that the press read its status from just before the

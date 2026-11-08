@@ -21,5 +21,4 @@ class TemplateNotPressableError(PlatenError, ValueError):
         self.template_path = template_path
 
     def __str__(self) -> str:
-        """Return a string representation of the exception."""
         return f"Template '{self.template_path}' can't be pressed: {self.reason}"
