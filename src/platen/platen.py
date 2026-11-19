@@ -1,4 +1,5 @@
 from collections.abc import Callable, Iterable, Mapping
+from datetime import datetime
 from logging import getLogger
 from os import PathLike
 from pathlib import Path, PurePosixPath
@@ -15,6 +16,7 @@ from jinja2 import (
 from rootle import as_spelled, identity, relative_within, resolve
 from rootle.types import Identity
 
+from .clock import as_time_zone, pressed_at
 from .exceptions import (
     DestinationIsProtectedError,
     DestinationIsTemplateError,
@@ -86,8 +88,8 @@ class Platen:
     `.platenignore` files use `.gitignore`-style patterns: see Mosey's documentation for
     exact rules: https://cariad.github.io/mosey/ignore-files/
 
-    Templates are pressed one at a time, and a press stops at the first error. The
-    templates pressed before it stay pressed.
+    Templates can call Jinja's and Platen's built-in functions:
+    https://cariad.github.io/platen/built-in-functions/
 
     A relative destination is found from the working directory as each template is
     written, so don't change the working directory during a press, like from a callable
@@ -138,6 +140,10 @@ class Platen:
             undefined=StrictUndefined,
         )
 
+        self._env.globals["now"] = self._now  # pyright: ignore[reportArgumentType]
+
+        self._pressed_at: datetime | None = None
+
     def _name(self, named: PathLike[str] | str) -> str:
         """
         Name a template, or directory of templates, the way Jinja names it.
@@ -164,6 +170,24 @@ class Platen:
 
         return relative.as_posix()
 
+    def _now(self, time_zone: str | None = None) -> datetime:
+        """
+        Get the time of the press that's under way, as templates' `now()`.
+
+        Args:
+            time_zone: Name of an IANA time zone, like "Europe/London", or `None` for
+                UTC.
+
+        Returns:
+            The time of the press, in the time zone.
+
+        Raises:
+            TimeZoneNotFoundError: When `time_zone` isn't a known time zone.
+        """
+        # Only a press renders templates, and every press sets the time first.
+        assert self._pressed_at is not None
+        return as_time_zone(self._pressed_at, time_zone)
+
     def _press(
         self,
         jobs: list[tuple[str, Path]],
@@ -185,7 +209,11 @@ class Platen:
                 protected file.
             DestinationIsTemplateError: When a destination is the same file as any of
                 `templates`.
+            SourceDateEpochError: When `SOURCE_DATE_EPOCH` is set, but isn't a whole
+                number of seconds since the Unix epoch.
         """
+        self._pressed_at = pressed_at()
+
         # Identify every template before anything is written, so that no destination
         # can overwrite one that's yet to be pressed, or one that a later template
         # references. Files are compared by identity rather than by path, so that
@@ -346,11 +374,17 @@ class Platen:
                 result can't be written, like when permissions deny it, symlinks loop,
                 or a file is in the way.
 
+            SourceDateEpochError: When `SOURCE_DATE_EPOCH` is set, but isn't a whole
+                number of seconds since the Unix epoch.
+
             TemplateNotInDirectoryError: When `directory` leads outside the source
                 templates directory.
 
             TemplateNotPressableError: When a template isn't a regular file, or it or a
                 template that it references isn't UTF-8.
+
+            TimeZoneNotFoundError: When a template asks `now()` for a time zone that
+                isn't known.
 
             jinja2.TemplateError: When a template can't be found or rendered, including
                 when a template that it references isn't a regular file.
@@ -460,6 +494,9 @@ class Platen:
                 like when `destination` is a directory, permissions deny it, or
                 symlinks loop.
 
+            SourceDateEpochError: When `SOURCE_DATE_EPOCH` is set, but isn't a whole
+                number of seconds since the Unix epoch.
+
             TemplateNotInDirectoryError: When `template` leads outside the source
                 templates directory.
 
@@ -470,6 +507,9 @@ class Platen:
             TemplateNotPressableError: When `template` isn't a regular file (like a
                 directory or a FIFO), or it or a template that it references isn't
                 UTF-8.
+
+            TimeZoneNotFoundError: When a template asks `now()` for a time zone that
+                isn't known.
 
             jinja2.TemplateError: When the template can't be found or rendered,
                 including when a template that it references isn't a regular file.

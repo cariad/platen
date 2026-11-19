@@ -55,6 +55,7 @@ dependencies = [
   "mosey>=0.8.0,<0.9",
   "rootle>=1.3.0,<2",
   "ruamel-yaml>=0.19.1,<0.20",
+  "tzdata>=2026.6",
   "watchfiles>=1.3.0,<2",
 ]
 description = "Press structured data into documents"
