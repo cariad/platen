@@ -5,8 +5,10 @@ from .exceptions import (
     DestinationIsTemplateError,
     DestinationWithinDirectoryError,
     PlatenError,
+    SourceDateEpochError,
     TemplateNotInDirectoryError,
     TemplateNotPressableError,
+    TimeZoneNotFoundError,
 )
 from .platen import Platen
 
@@ -18,6 +20,8 @@ __all__ = [
     "DestinationWithinDirectoryError",
     "Platen",
     "PlatenError",
+    "SourceDateEpochError",
     "TemplateNotInDirectoryError",
     "TemplateNotPressableError",
+    "TimeZoneNotFoundError",
 ]

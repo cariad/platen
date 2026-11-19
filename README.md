@@ -80,6 +80,8 @@ platen --templates templates --values values.yaml --out build --serve
 
 See [Serving with live reload](https://cariad.github.io/platen/#serving-with-live-reload) in the user guide for what's served, and how.
 
+Platen also gives templates [built-in functions](https://cariad.github.io/platen/built-in-functions/), like the time of the press.
+
 ## Contributing
 
 See [Contributing](https://cariad.github.io/platen/contributing/) in the user guide to set up the project and run its checks.

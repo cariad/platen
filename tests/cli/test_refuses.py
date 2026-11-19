@@ -442,6 +442,36 @@ def test_refuses_paths_in_deleted_working_directory(
     )
 
 
+def test_refuses_source_date_epoch_that_is_not_valid(
+    capsys: CaptureFixture[str],
+    monkeypatch: MonkeyPatch,
+    project: Path,
+) -> None:
+    """
+    A `SOURCE_DATE_EPOCH` that isn't a whole number of seconds since the Unix epoch
+    must be refused, naming it and its value.
+    """
+    monkeypatch.setenv(
+        "SOURCE_DATE_EPOCH",
+        "yesterday",
+    )
+
+    assert_fails(
+        capsys,
+        project,
+        [
+            "--template",
+            "README.template",
+            "--values",
+            "values.yaml",
+            "--out",
+            "README.md",
+        ],
+        "SOURCE_DATE_EPOCH ('yesterday') must be a whole number of seconds since the "
+        "Unix epoch",
+    )
+
+
 def test_refuses_template_error_without_file(
     capsys: CaptureFixture[str],
     monkeypatch: MonkeyPatch,
@@ -601,6 +631,12 @@ def test_refuses_template_that_cannot_be_read(
         (
             {"page.template": "Hello\n{{ 1 / 0 }}\n"},
             "ZeroDivisionError: division by zero ({docs}/page.template, line 2)",
+        ),
+        (
+            {
+                "page.template": 'Hello\n{{ now("Mars/Olympus") }}\n',
+            },
+            "Time zone 'Mars/Olympus' not found ({docs}/page.template, line 2)",
         ),
     ],
 )

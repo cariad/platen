@@ -164,6 +164,8 @@ This will press every template into the build directory:
     </html>
     ```
 
+Templates can also call Platen's [built-in functions](built-in-functions.md), like `now()` for the time of the press.
+
 ## Command line
 
 Installing Platen also installs the `platen` command. To install only the command, run `uv tool install platen` or `pipx install platen`.
@@ -210,8 +212,6 @@ platen: error: 'name' is undefined (/home/me/cv/README.template, line 1)
 ```
 
 Errors name each template that Platen found by its absolute path, which can look different from how you typed it, like `/private/tmp` for `/tmp` on macOS. They name destinations as you typed them.
-
-Platen presses one file at a time, and stops at the first error. The outputs that it wrote before the error stay written. See [When a press fails](#when-a-press-fails).
 
 ### Watching for changes
 
@@ -325,23 +325,6 @@ Platen checks nothing else. In particular:
 - Two templates can press to the same file, like through a symlink or hard link within the destination. The later result overwrites the earlier one.
 - A file or directory in the way of a result stops the press with the operating system's own error, like `FileExistsError` or `IsADirectoryError`.
 - A destination like `missing/../tasks.md` presses to `tasks.md`, but creates the `missing` directory on the way.
-
-## When a press fails
-
-`press` and `press_directory` walk the whole directory before they press anything, so a directory that can't be read, or a loop of symlinks, stops the press before anything is written.
-
-Then Platen presses one template at a time, in Mosey's [walk order](https://cariad.github.io/mosey/walk-order/), and stops at the first error. The results that it wrote before the error stay written, and the templates after it aren't pressed. For example, Platen presses `a.md`, then `b.md`, then `b/c.md`, then `z.md`. If `b.md` fails to render, only `a.md` is written.
-
-A template stops the press when:
-
-- It isn't UTF-8, even when it's only included, extended or imported. Platen raises `TemplateNotPressableError`.
-- It isn't a regular file, like a directory, a FIFO or a device, even through a symlink. Platen raises `TemplateNotPressableError` for a template that it presses, and Jinja raises `TemplateNotFound` for one that's only included, extended or imported, so that `ignore missing` still skips it. Neither reads the file, so neither can block on a FIFO or read a device like `/dev/zero` forever.
-- Jinja can't find it, like a broken symlink, or a file in a directory that permissions hide. Jinja raises `TemplateNotFound`.
-- It fails to render, like when it uses a value that you didn't give. Jinja raises its own error, like `UndefinedError`.
-
-Anything else, like a file that can't be read or written, raises the operating system's own error, like `PermissionError`.
-
-`DestinationIsProtectedError`, `DestinationIsTemplateError`, `DestinationWithinDirectoryError`, `TemplateNotInDirectoryError` and `TemplateNotPressableError` are subclasses of `PlatenError` and `ValueError`.
 
 ## Finding what a press reads
 
